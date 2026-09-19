@@ -1,0 +1,164 @@
+// Skills: reusable instruction packs the model can pull in on demand.
+//
+// Each lives at skills/<name>/SKILL.md with YAML front matter:
+//
+//   ---
+//   name: reactive-ui
+//   description: How to build reactive components in this codebase.
+//   ---
+//   ...body...
+//
+// Only the name and description go into the system prompt. The body is fetched
+// via the load_skill tool when the model decides it is relevant. On a 27B model
+// at ~39 t/s, that difference is the whole ballgame: ten skills inlined would
+// cost thousands of prompt tokens on every single turn.
+import { readFile, readdir, writeFile, mkdir, rm } from 'node:fs/promises';
+import { join, sep, dirname, basename } from 'node:path';
+import { existsSync } from 'node:fs';
+
+/** Directory-safe identifier. Skill names become directory names, so unlike a
+ *  display string this must never contain separators or parent references. */
+export function skillSlug(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60);
+}
+
+/** Front matter is single-line scalars; a pasted newline would forge keys. */
+export function oneLine(value, max = 200) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/** Parse `---`-delimited front matter. Deliberately tiny: scalars only. */
+export function parseFrontMatter(text) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+  if (!match) return { meta: {}, body: text.trim() };
+  const meta = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line.trim());
+    if (!kv) continue;
+    let value = kv[2].trim().replace(/^["']|["']$/g, '');
+    if (value === 'true') value = true;
+    else if (value === 'false') value = false;
+    meta[kv[1]] = value;
+  }
+  return { meta, body: match[2].trim() };
+}
+
+export class SkillStore {
+  constructor(dir) {
+    this.dir = dir;
+  }
+
+  async list() {
+    if (!existsSync(this.dir)) return [];
+    const entries = await readdir(this.dir, { withFileTypes: true });
+    const out = [];
+    for (const entry of entries) {
+      const file = entry.isDirectory()
+        ? join(this.dir, entry.name, 'SKILL.md')
+        : entry.name.endsWith('.md')
+          ? join(this.dir, entry.name)
+          : null;
+      if (!file || !existsSync(file)) continue;
+      const { meta, body } = parseFrontMatter(await readFile(file, 'utf8'));
+      const name = meta.name || (entry.isDirectory() ? entry.name : entry.name.replace(/\.md$/, ''));
+      out.push({
+        name,
+        description: meta.description || '(no description)',
+        file,
+        bytes: body.length,
+      });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async load(name) {
+    const skills = await this.list();
+    const hit = skills.find((s) => s.name.toLowerCase() === String(name).toLowerCase());
+    if (!hit) {
+      const names = skills.map((s) => s.name).join(', ') || 'none installed';
+      throw new Error(`no skill named "${name}". Available: ${names}`);
+    }
+    const { body } = parseFrontMatter(await readFile(hit.file, 'utf8'));
+    return { ...hit, body };
+  }
+
+  async save(name, description, body) {
+    const id = skillSlug(name);
+    if (!id) throw new Error('skill needs a name');
+    const dir = join(this.dir, id);
+    await mkdir(dir, { recursive: true });
+    const text = `---\nname: ${id}\ndescription: ${oneLine(description)}\n---\n\n${String(body || '').trim()}\n`;
+    await writeFile(join(dir, 'SKILL.md'), text, 'utf8');
+    return { name: id, description: oneLine(description) };
+  }
+
+  /** Delete a skill by name (directory or loose .md alike). */
+  async remove(name) {
+    const skills = await this.list();
+    const hit = skills.find((s) => s.name.toLowerCase() === String(name).toLowerCase());
+    if (!hit) throw new Error(`no skill named "${name}"`);
+    // Directory skills point at their SKILL.md; remove the whole directory so
+    // no empty shell is left behind. Loose .md skills remove just the file.
+    let target = join(hit.file);
+    if (basename(target).toLowerCase() === 'skill.md') target = dirname(target);
+    // `hit.file` was built from a directory entry, not user input, but stay
+    // inside the store anyway: a hostile skill name must not escape it.
+    const base = this.dir.endsWith(sep) ? this.dir : this.dir + sep;
+    if (target !== base.slice(0, -1) && !target.startsWith(base)) {
+      throw new Error(`refusing to delete outside skills/: ${hit.file}`);
+    }
+    await rm(target, { recursive: true, force: true });
+    return hit.name;
+  }
+}
+
+/** The one-line-per-skill catalogue that goes in the system prompt. */
+export function skillCatalogue(skills) {
+  if (!skills.length) return '';
+  const rows = skills.map((s) => `- ${s.name}: ${s.description}`).join('\n');
+  return `## Skills\n\nInstruction packs available to you. Call load_skill with the name to read one in full before doing work it covers.\n\n${rows}`;
+}
+
+export function skillTools(store) {
+  return {
+    load_skill: {
+      schema: {
+        description:
+          'Read a skill in full. Do this before starting work the skill covers, not after.',
+        parameters: {
+          type: 'object',
+          properties: { name: { type: 'string' } },
+          required: ['name'],
+        },
+      },
+      async run({ name }) {
+        const skill = await store.load(name);
+        return `# Skill: ${skill.name}\n\n${skill.body}`;
+      },
+    },
+    save_skill: {
+      mutates: true,
+      schema: {
+        description:
+          'Write a new skill, or replace an existing one, so the approach is reusable in later sessions. Use when the user teaches you a repeatable procedure.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'kebab-case identifier' },
+            description: { type: 'string', description: 'One line; this is what you will see next session when deciding whether to load it.' },
+            body: { type: 'string', description: 'The instructions, in Markdown.' },
+          },
+          required: ['name', 'description', 'body'],
+        },
+      },
+      async run({ name, description, body }) {
+        await store.save(name, description, body);
+        return `Saved skill "${name}".`;
+      },
+    },
+  };
+}

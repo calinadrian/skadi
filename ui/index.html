@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skadi</title>
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Icon sprite. Referenced with <use href="#i-name">. -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M4.5 3.2v9.6a.6.6 0 0 0 .92.5l7.3-4.8a.6.6 0 0 0 0-1l-7.3-4.8a.6.6 0 0 0-.92.5Z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="2.2"/></symbol>
+  <symbol id="i-restart" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.9-4.16"/><path d="M13.6 2.2v3.2h-3.2"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.6v8.8M3.6 8h8.8"/></symbol>
+  <symbol id="i-send" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3.2M3.9 7.3 8 3.2l4.1 4.1"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5 8 10l3.5-3.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5h-6a2 2 0 0 0-2 2v6"/></symbol>
+  <symbol id="i-download" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5v7.6M4.8 7.2 8 10.4l3.2-3.2M3 13h10"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5 6.5 11.5 12.5 5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="7" cy="7" r="4.4"/><path d="M10.4 10.4 14 14"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 16 16"><path d="M9.3 1.4 2.9 9.2h3.8l-.6 5.4 6.6-8.2H8.7z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M7.13 2.6 1.6 12.1a1 1 0 0 0 .87 1.5h11.06a1 1 0 0 0 .87-1.5L8.87 2.6a1 1 0 0 0-1.74 0Zm.37 3.3h1v4h-1Zm0 5.2h1v1.2h-1Z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.6 4.1c0-.72.58-1.3 1.3-1.3h3l1.4 1.5h5.8c.72 0 1.3.58 1.3 1.3v6.3c0 .72-.58 1.3-1.3 1.3H2.9c-.72 0-1.3-.58-1.3-1.3Z"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M13 7.3 8 12.3a3.1 3.1 0 0 1-4.4-4.4l5.2-5.2a2.1 2.1 0 1 1 3 3l-5.2 5.2a1 1 0 0 1-1.5-1.5l4.7-4.7"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="5.6"/><path d="M2.5 8h11M8 2.4c1.5 1.6 2.3 3.6 2.3 5.6S9.5 12 8 13.6C6.5 12 5.7 10 5.7 8S6.5 4 8 2.4Z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><circle cx="5.4" cy="5.4" r="2.9"/><path d="M7.5 7.5 13 13M11 11l1.4-1.4M9.4 9.4l1.3-1.3"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.8" y="4.4" width="12.4" height="9" rx="1.6"/><circle cx="8" cy="8.9" r="2.5"/><path d="M5.6 4.4 6.6 2.6h2.8l1 1.8"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><path d="M3.4 4.4h9.2M6.4 4.4V3.1h3.2v1.3M4.9 4.4l.5 8.2h5.2l.5-8.2"/></symbol>
+  <symbol id="i-chip" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.3" y="4.3" width="7.4" height="7.4" rx="1.2"/><path d="M6.6 1.9v2.4M9.4 1.9v2.4M6.6 11.7v2.4M9.4 11.7v2.4M1.9 6.6h2.4M1.9 9.4h2.4M11.7 6.6h2.4M11.7 9.4h2.4"/></symbol>
+  <symbol id="i-win-min" viewBox="0 0 10 10"><rect x="0" y="4.6" width="10" height="1" fill="currentColor"/></symbol>
+  <symbol id="i-win-max" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="9" height="9"/></symbol>
+  <symbol id="i-win-restore" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="2.5" width="7" height="7"/><path d="M2.5 2.5V0.5h7v7h-2"/></symbol>
+  <symbol id="i-win-close" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M0.6 0.6l8.8 8.8M9.4 0.6l-8.8 8.8"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 5h12M2 8h12M2 11h12"/><circle cx="10.5" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="5.5" cy="8" r="1.6" fill="currentColor" stroke="none"/><circle cx="11" cy="11" r="1.6" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 1.8 14.2 6.5l-2.3.7-2.6 2.6-.4 3.4-1.4 1.4-.9-3.1-3.1-3.1L.4 7l1.4-1.4 3.4-.4 2.6-2.6Z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M4 1.8h5.2L12.2 4.8v9.4H4Z"/><path d="M9 1.8v3.2h3.2"/></symbol>
+  <symbol id="i-diff" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1.8 4.5h5.4M1.8 8h5.4M1.8 11.5h5.4"/><path d="M10.2 3.5h3.6M11.5 10v3M10 11.5h3"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="2.5" width="12" height="3.2" rx="0.8"/><path d="M3.5 5.7v7.1h9V5.7M6.8 8.2h2.4"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.2h2.3L8.6 3.4v9.2L5.3 9.8H3Z"/><path d="M10.8 6.2a2.6 2.6 0 0 1 0 3.6M12.6 4.4a5.1 5.1 0 0 1 0 7.2"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.2h2.3L8.6 3.4v9.2L5.3 9.8H3Z"/><path d="M11 6.4l3.2 3.2M14.2 6.4 11 9.6"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.4"/><path d="M4.6 6.4 6.8 8.4l-2.2 2M8.6 11h3"/></symbol>
+  <symbol id="i-list" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.2" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.8" cy="8" r="1.3"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.2 2.8a1.8 1.8 0 0 1 2.5 2.5L5.4 13.6l-3.3.9.9-3.3Z"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M1.8 8S4 4.2 8 4.2 14.2 8 14.2 8 12 11.8 8 11.8 1.8 8 1.8 8Z"/><circle cx="8" cy="8" r="1.8"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><path d="M2.5 2.5l11 11M6.6 4.5A4.6 4.6 0 0 1 8 4.2c4 0 6.2 3.8 6.2 3.8a12 12 0 0 1-2.4 2.5M9.9 11.3A4.6 4.6 0 0 1 8 11.8C4 11.8 1.8 8 1.8 8a12 12 0 0 1 3.1-3"/></symbol>
+  <!-- Skadi's mark: a snow-capped peak. Hunting ground of the winter giantess. -->
+  <symbol id="i-peak" viewBox="0 0 24 24">
+    <path d="M12 3 21.4 20a.7.7 0 0 1-.6 1H3.2a.7.7 0 0 1-.6-1Z" opacity=".38"/>
+    <path d="M12 3 16.1 10.4l-1.7-.5-1.5 1.5-1.6-2-1.7 2.4-1.7-.7Z"/>
+  </symbol>
+  <symbol id="i-panel" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.8" y="3" width="12.4" height="10" rx="1.6"/><path d="M10.2 3v10"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M12.49 4.84l1.52.19.78 1.47-1.2 1.5-1.36-.32a3.9 3.9 0 0 1 .36 1.72l1.36-.32 1.2 1.5-.78 1.47-1.52.19a5.4 5.4 0 0 1-1.04 1.3l.19 1.52-1.47.78-1.5-1.2-1.14.99a5.4 5.4 0 0 1-1.52 0l-1.14-.99-1.5 1.2-1.47-.78.19-1.52a5.4 5.4 0 0 1-1.04-1.3l-1.52-.19-.78-1.47 1.2-1.5 1.36.32a3.9 3.9 0 0 1 .36-1.72l-1.36.32-1.2-1.5.78-1.47 1.52-.19a5.4 5.4 0 0 1 1.04-1.3l-.19-1.52 1.47-.78 1.5 1.2 1.14-.99a5.4 5.4 0 0 1 1.52 0l1.14.99 1.5-1.2 1.47.78-.19 1.52a5.4 5.4 0 0 1 1.04 1.3Zm-4.49.86a2.16 2.16 0 1 0 0 4.32 2.16 2.16 0 0 0 0-4.32Z"/></symbol>
+
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <img class="brand-mark" src="icon.png" alt="">
+    <span class="brand-copy"><span class="brand-name">Skadi</span><span class="brand-sub">AI workspace</span></span>
+  </div>
+
+  <button id="btnChats" class="icon-btn mobile-only" title="Toggle chats" aria-label="Toggle chats" aria-pressed="false"><svg class="icon"><use href="#i-panel"/></svg></button>
+
+  <div class="topbar-context" aria-live="polite">
+    <span class="topbar-project" id="topbarProject">No project</span>
+    <span class="topbar-separator" aria-hidden="true">/</span>
+    <span class="topbar-session" id="topbarSession">New session</span>
+  </div>
+
+  <div class="status-pill local-only" id="serverState">
+    <span class="dot" data-state="stopped"></span>
+    <span id="serverStateText">stopped</span>
+  </div>
+
+  <div class="metrics" id="throughput"></div>
+
+  <div class="spacer"></div>
+
+  <button id="btnBrowser" class="icon-btn" title="Toggle browser pane" aria-label="Toggle browser pane" aria-pressed="false"><svg class="icon"><use href="#i-globe"/></svg><span class="dot" id="browserDot" data-state="stopped"></span></button>
+  <button id="btnInspector" class="icon-btn" title="Toggle activity panel" aria-label="Toggle activity panel" aria-pressed="false"><svg class="icon"><use href="#i-panel"/></svg></button>
+  <button id="btnTerminalDock" class="icon-btn" title="Toggle terminal" aria-label="Toggle terminal" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
+  <button id="btnLocalAI" class="icon-btn" title="Local AI controls" aria-label="Open Local AI controls"><svg class="icon"><use href="#i-chip"/></svg></button>
+  <button id="btnChanges" class="icon-btn" title="Working tree changes" aria-label="Working tree changes"><svg class="icon"><use href="#i-diff"/></svg></button>
+  <button id="btnBenchmarks" class="icon-btn" title="Benchmarks" aria-label="Benchmarks"><svg class="icon"><use href="#i-peak"/></svg></button>
+
+  <button id="btnSettings" class="icon-btn" title="Settings" aria-label="Settings"><svg class="icon"><use href="#i-gear"/></svg></button>
+
+  <div class="window-controls" id="windowControls" hidden>
+    <button class="wc" id="wcMin" title="Minimize" aria-label="Minimize"><svg class="wc-glyph"><use href="#i-win-min"/></svg></button>
+    <button class="wc" id="wcMax" title="Maximize" aria-label="Maximize"><svg class="wc-glyph"><use href="#i-win-max"/></svg></button>
+    <button class="wc close" id="wcClose" title="Close" aria-label="Close"><svg class="wc-glyph"><use href="#i-win-close"/></svg></button>
+  </div>
+</header>
+
+<!-- The window outlives the server it talks to: a killed or crashed backend
+     used to leave the last frame frozen on screen, "Stop generating" and all.
+     This says so instead. -->
+<div class="offline-bar" id="offlineBar" hidden role="status">
+  <svg class="icon"><use href="#i-warn"/></svg>
+  <span id="offlineText">Lost connection to Skadi — the server is not responding. Reconnecting…</span>
+</div>
+
+<main class="layout">
+
+  <!-- ---------------------------------------------------------- left rail -->
+  <!-- Chats only. Skills and memory live in Settings now. -->
+  <aside class="rail left" id="chatRail">
+    <section class="panel chats-panel">
+      <button id="btnNewSession" class="new-chat-btn" type="button"><svg class="icon"><use href="#i-edit"/></svg><span>New chat</span></button>
+      <button id="btnNewGroup" hidden aria-hidden="true" tabindex="-1"></button>
+      <div class="chat-search">
+        <input type="text" id="chatSearch" aria-label="Search chats" placeholder="Search chats…" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="chat-filter" id="chatFilter">
+        <button data-filter="all" class="active">All</button>
+        <button data-filter="unread">Unread</button>
+        <button data-filter="archived">Archived</button>
+      </div>
+      <div class="chat-list" id="chatList"></div>
+    </section>
+    <!-- Which version this is, and whether there is a newer one. -->
+    <div class="rail-foot">
+      <button type="button" class="version-chip" id="versionChip" hidden>
+        <svg class="icon"><use href="#i-peak"/></svg>
+        <span class="version-text" id="versionText"></span>
+        <span class="version-flag" id="versionFlag" hidden>Update</span>
+      </button>
+    </div>
+    <div class="rail-gutter" id="gutterLeft" tabindex="0" role="separator"
+      aria-orientation="vertical" aria-label="Resize chats panel"
+      aria-valuemin="180" aria-valuemax="520" aria-valuenow="236"
+      title="Drag to resize · double-click to reset"></div>
+  </aside>
+
+  <!-- ------------------------------------------------------- centre column -->
+  <!-- Chat is always visible. The browser opens beside it, Claude-style,
+       sharing the row through a draggable divider. -->
+  <section class="centre" id="centre">
+
+  <!-- -------------------------------------------------------------- chat -->
+  <div class="chat view active" id="chatView">
+    <!-- Everything this chat changed on disk, above everything it said. Hidden
+         until the chat has edited something. -->
+    <div class="chat-changes" id="chatChanges" hidden>
+      <button class="chat-changes-main" id="chatChangesOpen" type="button"
+        title="Show every file this chat changed">
+        <svg class="icon"><use href="#i-diff"/></svg>
+        <span id="chatChangesLabel">No changes</span>
+        <span class="chat-changes-stats" id="chatChangesStats"></span>
+      </button>
+      <span class="chat-changes-note" id="chatChangesNote" hidden></span>
+      <button class="btn tiny" id="chatChangesRevert" hidden
+        title="Put every file this chat changed back as it was">Revert all</button>
+      <button class="btn tiny" id="chatChangesReapply" hidden
+        title="Apply every reverted edit in this chat again">Reapply all</button>
+    </div>
+    <div class="messages" id="messages">
+      <div class="empty" id="emptyState">
+        <h3>What should we build?</h3>
+      </div>
+    </div>
+
+    <div class="approval" id="approval" hidden>
+      <svg class="icon warn-icon"><use href="#i-warn"/></svg>
+      <div class="approval-body">
+        <strong id="approvalTitle"></strong>
+        <pre id="approvalArgs"></pre>
+      </div>
+      <div class="approval-actions">
+        <button id="btnDeny" class="btn">Deny</button>
+        <button id="btnAllow" class="btn primary">Allow</button>
+      </div>
+    </div>
+
+    <form class="composer" id="composer">
+      <div class="attach-tray" id="attachTray" hidden></div>
+      <div class="composer-box" id="composerBox">
+        <textarea id="input" rows="1" placeholder="Ask Skadi to do something in your project…"></textarea>
+        <div class="composer-bar">
+          <div class="bar-group">
+            <button type="button" class="icon-btn attach-btn" id="btnAttach" title="Attach files or a folder">
+              <svg class="icon"><use href="#i-clip"/></svg>
+            </button>
+            <select id="modeSelect" class="effort-select mode-select" aria-label="Permission mode" title="Permission mode — what the agent may do without asking"></select>
+          </div>
+          <div class="bar-group">
+            <!-- Which AI answers *this* chat. Local and every hosted provider can
+                 be in use at once, one per chat. -->
+            <div class="model-picker">
+              <button type="button" class="model-chip" id="modelChip" aria-haspopup="true" aria-expanded="false"></button>
+              <div class="model-menu" id="modelMenu" role="menu" hidden></div>
+            </div>
+            <select id="effortSelect" class="effort-select in-box" aria-label="Reasoning effort" title="Reasoning effort for this turn — Default uses the server or provider default"></select>
+            <button type="submit" class="send-btn" id="btnSend" title="Send" aria-label="Send"><svg class="icon"><use href="#i-send"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="composer-controls">
+        <div class="picker project-picker" title="Project folder the agent works in">
+          <svg class="icon"><use href="#i-folder"/></svg>
+          <select id="projectSelect" aria-label="Active project"></select>
+          <span class="branch" id="branchName" title="Git branch"></span>
+          <button id="btnAddProject" class="icon-btn" title="Add a project folder"><svg class="icon"><use href="#i-plus"/></svg></button>
+        </div>
+        <button type="button" id="btnCompact" class="btn control-btn" title="Summarise older messages now so the session fits the context window">Compact</button>
+        <div class="activity" id="activity" hidden>
+          <span class="dot" data-state="starting"></span>
+          <span id="activityText">Working…</span>
+        </div>
+        <span class="hint" id="roundInfo"></span>
+        <span class="hint" id="ctxInfo" title="Estimated context used in this session"></span>
+        <button type="button" id="taskPill" class="task-pill" hidden></button>
+        <span class="kbd-hint"><kbd>Enter</kbd> send <span aria-hidden="true">·</span> <kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
+      </div>
+      <input type="file" id="fileInput" multiple hidden>
+      <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+      <div class="attach-menu" id="attachMenu" hidden>
+        <button type="button" data-pick="files"><svg class="icon"><use href="#i-clip"/></svg>Files or photos…</button>
+        <button type="button" data-pick="folder"><svg class="icon"><use href="#i-folder"/></svg>Folder…</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="split-gutter" id="gutterSplit" hidden tabindex="0" role="separator"
+    aria-orientation="vertical" aria-label="Resize browser pane"
+    title="Drag to resize · double-click to reset"></div>
+
+  <!-- ----------------------------------------------------------- browser -->
+  <!-- The page is mirrored here over CDP screencast, so clicks land in the
+       real Chromium and the agent and the user drive the same session. -->
+  <div class="view browser-view" id="browserView">
+    <div class="browser-bar">
+      <button class="icon-btn" id="btnBack" title="Back"><svg class="icon back"><use href="#i-chevron"/></svg></button>
+      <button class="icon-btn" id="btnForward" title="Forward"><svg class="icon fwd"><use href="#i-chevron"/></svg></button>
+      <button class="icon-btn" id="btnReload" title="Reload"><svg class="icon"><use href="#i-restart"/></svg></button>
+      <input type="text" id="browserUrl" placeholder="localhost:5173" spellcheck="false">
+      <button class="btn tiny" id="btnOpenUrl"><svg class="icon"><use href="#i-globe"/></svg>Go</button>
+      <button class="btn tiny" id="btnShot" title="Capture and send to the agent"><svg class="icon"><use href="#i-camera"/></svg></button>
+      <button class="btn tiny" id="btnDevice" title="Switch the viewport between desktop and mobile">Desktop</button>
+      <!-- Page audio. The screencast carries no sound, so this drives the
+           volume inside the page itself, where the agent's browser plays it. -->
+      <div class="vol" id="browserVolume">
+        <button class="icon-btn" id="btnMute" title="Mute the page" aria-pressed="false"><svg class="icon"><use href="#i-volume"/></svg></button>
+        <!-- volume slider: custom role=slider div, built in app.js -->
+      </div>
+      <button class="btn tiny" id="btnConsole" title="Show this chat's page console" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
+      <button class="icon-btn" id="btnCloseBrowser" title="Close this chat's browser"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>
+
+    <div class="browser-stage" id="browserStage" tabindex="0">
+      <img id="browserFrame" alt="Live view of the page the agent is working with">
+      <div class="browser-empty" id="browserEmpty">
+        <svg class="empty-mark"><use href="#i-globe"/></svg>
+        <h3>No page open</h3>
+        <p>Type a URL above, or ask Skadi to open one. Clicks and typing here go to the real page. This browser belongs to this chat alone.</p>
+      </div>
+    </div>
+
+    <!-- The same console the agent reads with browser_console, live. -->
+    <div class="browser-console" id="browserConsole" hidden>
+      <div class="console-bar">
+        <strong>Console</strong>
+        <label class="console-filter"><input type="checkbox" id="consoleErrorsOnly"> errors only</label>
+        <span class="spacer"></span>
+        <span class="console-count" id="consoleCount">0 lines</span>
+        <button class="icon-btn" id="btnConsoleClear" title="Clear the console"><svg class="icon"><use href="#i-trash"/></svg></button>
+      </div>
+      <div class="console-rows" id="consoleRows"></div>
+    </div>
+
+    <div class="browser-status">
+      <span id="browserStatus">idle</span>
+      <span class="spacer"></span>
+      <span class="kbd-hint">click and type to interact · <kbd>1280×800</kbd></span>
+    </div>
+  </div>
+
+  </section>
+
+  <!-- --------------------------------------------------------- right tool dock -->
+  <aside class="rail right tool-dock" id="inspector" aria-label="Workspace tools">
+    <div class="rail-gutter right" id="gutterRight" tabindex="0" role="separator"
+      aria-orientation="vertical" aria-label="Resize workspace tools"
+      aria-valuemin="260" aria-valuemax="560" aria-valuenow="334"
+      title="Drag to resize · double-click to reset"></div>
+
+    <header class="tool-dock-head">
+      <strong>Workspace</strong>
+      <button class="icon-btn" id="btnCloseInspector" title="Close workspace tools" aria-label="Close workspace tools"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <nav class="tool-tabs" id="toolTabs" aria-label="Workspace tool">
+      <button type="button" class="active" data-tool="review" aria-pressed="true"><svg class="icon"><use href="#i-diff"/></svg><span>Review</span></button>
+      <button type="button" data-tool="browser" aria-pressed="false"><svg class="icon"><use href="#i-globe"/></svg><span>Browser</span></button>
+      <button type="button" data-tool="files" aria-pressed="false"><svg class="icon"><use href="#i-file"/></svg><span>Files</span></button>
+      <button type="button" data-tool="ai" aria-pressed="false"><svg class="icon"><use href="#i-chip"/></svg><span>Local AI</span></button>
+    </nav>
+    <div class="tool-panes">
+      <section class="tool-pane active" data-tool-pane="review">
+        <div class="tool-empty-icon"><svg class="icon"><use href="#i-diff"/></svg></div>
+        <h2>Review changes</h2>
+        <p>Inspect the current working tree and every file changed by this chat.</p>
+        <button class="btn primary" id="toolOpenChanges">Open review</button>
+      </section>
+      <section class="tool-pane" data-tool-pane="browser" hidden>
+        <div class="tool-empty-icon"><svg class="icon"><use href="#i-globe"/></svg></div>
+        <h2>Browser</h2>
+        <p>Open the shared browser beside the conversation to inspect and interact with your app.</p>
+        <button class="btn primary" id="toolToggleBrowser">Open browser</button>
+      </section>
+      <section class="tool-pane files-pane" data-tool-pane="files" hidden>
+        <div class="files-head">
+          <h2 id="filesRoot">Files</h2>
+          <button class="icon-btn" id="filesRefresh" title="Reload the file list"><svg class="icon"><use href="#i-restart"/></svg></button>
+        </div>
+        <input type="search" id="filesFilter" class="files-filter" placeholder="Filter files…" aria-label="Filter files" spellcheck="false" autocomplete="off">
+        <div class="files-tree" id="filesTree" role="tree"></div>
+      </section>
+
+    <section class="tool-pane local-ai-pane" data-tool-pane="ai" hidden>
+    <div class="tool-pane-title"><h2>Local AI</h2><span class="status-label">local</span></div>
+    <p class="local-ai-intro">Load as many models as your GPU holds. Each chat picks which one answers.</p>
+
+    <!-- What is running now: one card per loaded model, each with its own Eject. -->
+    <section class="panel loaded-panel">
+      <header class="panel-head">
+        <h2>Loaded models</h2><span class="count" id="loadedCount"></span>
+        <button class="btn tiny" id="btnEjectAll" hidden title="Unload every model Skadi started">Eject all</button>
+      </header>
+      <div class="loaded-list" id="loadedList"></div>
+    </section>
+
+    <!-- Model first, then the settings to load it with. -->
+    <section class="panel load-panel">
+      <header class="panel-head">
+        <h2>Load a model</h2>
+        <button class="btn tiny" id="btnModels" title="Download models from Hugging Face, browse tested profiles, and see what fits your GPU"><svg class="icon"><use href="#i-download"/></svg>Browse models</button>
+      </header>
+      <select id="loadModel" aria-label="Model to load"></select>
+      <div class="load-label" id="loadSettingsLabel">Settings</div>
+      <div class="load-profiles" id="loadProfiles" role="radiogroup" aria-labelledby="loadSettingsLabel"></div>
+      <div class="load-links" id="loadLinks"></div>
+      <button class="btn primary load-go" id="btnLoad">Load</button>
+      <p class="hint" id="loadHint"></p>
+    </section>
+
+    <section class="panel" id="tasksPanel">
+      <header class="panel-head"><h2>Background tasks</h2><span class="count" id="taskCount"></span></header>
+      <div class="task-list" id="taskList"></div>
+    </section>
+
+
+
+    <section class="panel shots-panel">
+      <header class="panel-head"><h2>Screenshots</h2></header>
+      <div class="shot-strip" id="shotStrip"></div>
+      <p class="hint">Captures the agent took with <code>browser_screenshot</code>. With a vision model it sees these too and can click by coordinate.</p>
+    </section>
+
+    <section class="panel local-only">
+      <header class="panel-head"><h2>Forecast</h2><span class="tag" id="estApprox" hidden>approximate</span></header>
+      <table class="kv" id="estimateTable"></table>
+      <div class="callout" id="verdict"></div>
+      <div class="fit-row">
+        <button id="btnFit" class="btn">Fit to VRAM</button>
+        <span class="hint" id="fitHint"></span>
+      </div>
+      <p class="hint" id="estNotes"></p>
+    </section>
+
+    <section class="panel local-only">
+      <header class="panel-head">
+        <h2>Profile</h2>
+        <button class="icon-btn" id="btnLoadModel" title="New profile with default settings"><svg class="icon"><use href="#i-plus"/></svg></button>
+        <button class="icon-btn" id="btnDuplicateProfile" title="Duplicate this profile into an editable copy"><svg class="icon"><use href="#i-copy"/></svg></button>
+        <button class="icon-btn" id="btnDeleteProfile" title="Delete this profile"><svg class="icon"><use href="#i-trash"/></svg></button>
+      </header>
+      <div class="profile-name" id="profileName"></div>
+      <div class="lock-note temp-note" id="profileTemp" hidden>
+        <svg class="icon"><use href="#i-warn"/></svg>
+        <span>These are default settings, made for this load. They go when the model is ejected unless you save them.</span>
+        <button type="button" class="btn tiny" id="btnSaveProfile">Save profile</button>
+      </div>
+      <div class="lock-note" id="profileLock" hidden>
+        <svg class="icon"><use href="#i-lock"/></svg>
+        <span>Skadi catalog profile, tuned for <b id="profileLockVram">16 GB</b> of VRAM. It can't be edited &mdash; duplicate it to make a copy you can change.</span>
+      </div>
+      <div class="model-line" id="modelLine"></div>
+      <div class="settings" id="settings"></div>
+      <div class="profile-foot">
+        <button id="btnRestart" class="btn"><svg class="icon"><use href="#i-restart"/></svg>Apply &amp; restart</button>
+      </div>
+      <p class="hint">Changes save and re-forecast immediately. They reach the model when you press <em>Apply &amp; restart</em>.</p>
+    </section>
+
+    <section class="panel">
+      <header class="panel-head collapse" data-toggle="skadiSettings">
+        <h2>Skadi settings</h2>
+        <svg class="icon chevron"><use href="#i-chevron"/></svg>
+      </header>
+      <div class="settings" id="skadiSettings" hidden></div>
+    </section>
+
+    <section class="panel local-only">
+      <header class="panel-head"><h2>GPU memory</h2><span class="count" id="vramTotal"></span></header>
+      <div class="vram-bar" id="vramBar">
+        <div class="seg llama" id="segLlama"></div>
+        <div class="seg others" id="segOthers"></div>
+      </div>
+      <dl class="legend">
+        <div><dt><i class="sw llama"></i>llama-server</dt><dd id="vramLlama">—</dd></div>
+        <div><dt><i class="sw others"></i>everything else</dt><dd id="vramOthers">—</dd></div>
+        <div><dt><i class="sw free"></i>free</dt><dd id="vramFree">—</dd></div>
+      </dl>
+      <div class="callout bad" id="spill" hidden>
+        <svg class="icon"><use href="#i-warn"/></svg>
+        <span><span id="spillLead">Spilling </span><b id="spillAmount"></b><span id="spillText"> into system RAM — decode speed will drop hard.</span></span>
+      </div>
+    </section>
+
+    <pre id="logBox" hidden></pre>
+    </section>
+    </div>
+  </aside>
+</main>
+
+<section class="terminal-dock" id="terminalDock" hidden aria-label="Project terminal">
+  <div class="dock-gutter" id="gutterDock" tabindex="0" role="separator" aria-orientation="horizontal"
+    aria-label="Resize terminal" title="Drag to resize · double-click to reset"></div>
+  <header class="terminal-dock-head">
+    <div class="terminal-tab"><svg class="icon"><use href="#i-terminal"/></svg><span>PowerShell</span></div>
+    <span class="terminal-cwd" id="terminalCwd"></span>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="terminalClear" title="Clear terminal" aria-label="Clear terminal"><svg class="icon"><use href="#i-trash"/></svg></button>
+    <button class="icon-btn" id="terminalClose" title="Close terminal" aria-label="Close terminal"><svg class="icon"><use href="#i-x"/></svg></button>
+  </header>
+  <div class="terminal-output" id="terminalOutput" role="log" aria-live="polite"></div>
+  <form class="terminal-command" id="terminalForm">
+    <span class="terminal-prompt" id="terminalPrompt">PS&gt;</span>
+    <input id="terminalInput" type="text" aria-label="Terminal command" autocomplete="off" spellcheck="false" placeholder="Enter a PowerShell command">
+  </form>
+</section>
+
+<!-- Model manager: what is on disk, and Hugging Face to get more. The fit
+     verdicts come from each file's own GGUF header measured against this card. -->
+<div class="modal-veil" id="modelsVeil" hidden>
+  <div class="modal wide tall models-modal" role="dialog" aria-modal="true" aria-labelledby="modelsTitle">
+    <header class="modal-head">
+      <h2 id="modelsTitle">Models</h2>
+      <div class="mm-tabs" role="tablist" aria-label="Model source">
+        <button type="button" role="tab" data-tab="discover" aria-selected="false">Hugging Face</button>
+        <button type="button" role="tab" data-tab="catalog" aria-selected="false">Skadi catalog</button>
+        <button type="button" role="tab" data-tab="installed" aria-selected="true" class="active">Installed</button>
+      </div>
+      <span class="spacer"></span>
+      <button class="icon-btn" id="modelsClose" title="Close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="mm-body">
+      <section class="mm-pane" id="mm-installed"></section>
+      <section class="mm-pane" id="mm-catalog" hidden></section>
+      <section class="mm-pane" id="mm-discover" hidden>
+        <div class="mm-search">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input type="text" id="mmQuery" placeholder="Search models, or paste a Hugging Face link" spellcheck="false" autocomplete="off">
+          <select id="mmSort" aria-label="Sort results">
+            <option value="downloads">Most downloaded</option>
+            <option value="trendingScore">Trending</option>
+            <option value="likes">Most liked</option>
+            <option value="lastModified">Recently updated</option>
+          </select>
+        </div>
+        <div class="mm-split">
+          <div class="mm-results" id="mmResults"></div>
+          <div class="mm-detail" id="mmDetail"></div>
+        </div>
+      </section>
+    </div>
+    <div class="mm-downloads" id="mmDownloads" hidden></div>
+    <footer class="mm-foot"><span id="mmCard"></span></footer>
+  </div>
+</div>
+
+<!-- Skill / memory editor. One modal for both: the fields are built by app.js. -->
+<!-- Benchmarks: measured numbers for every profile, kept in
+     config/benchmarks.json so a run is recorded once and read here. -->
+<div class="modal-veil" id="benchVeil" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="benchTitle">
+    <header class="modal-head">
+      <h2 id="benchTitle">Benchmarks</h2>
+      <span class="bench-updated" id="benchUpdated"></span>
+      <span class="spacer"></span>
+      <button class="icon-btn" id="benchClose" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="bench-body" id="benchBody"></div>
+  </div>
+</div>
+
+<div class="modal-veil" id="editorVeil" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
+    <header class="modal-head">
+      <h2 id="editorTitle">Edit</h2>
+      <button class="icon-btn" id="editorClose" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="settings" id="editorFields"></div>
+    <div class="modal-actions">
+      <button class="btn danger" id="editorDelete" hidden>Delete</button>
+      <span class="spacer"></span>
+      <button class="btn" id="editorCancel">Cancel</button>
+      <button class="btn primary" id="editorSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings: one scrollable page grouped by task. Everything applies
+     instantly; the danger zone at the bottom is quarantined. -->
+<div class="modal-veil" id="settingsVeil" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <header class="modal-head settings-head">
+      <div class="settings-heading">
+        <h2 id="settingsTitle">Settings</h2>
+        <span class="settings-sub" id="settingsSub"><svg class="icon"><use href="#i-bolt"/></svg>applies instantly</span>
+      </div>
+      <button class="icon-btn" id="settingsClose" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="settings-layout">
+      <div class="settings-side">
+        <div class="settings-search">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input type="text" id="settingsSearch" placeholder="Search, Enter jumps" spellcheck="false" autocomplete="off">
+        </div>
+        <nav class="settings-nav" id="settingsNav" aria-label="Settings sections"></nav>
+      </div>
+      <div class="settings-body" id="settingsPane">
+      <p class="settings-nomatch" id="settingsNoMatch" hidden>No settings match.</p>
+    </div>
+    </div>
+  </div> </div>
+</div>
+
+<!-- Chat context menu: pinned / rename / unread / archive / groups. -->
+<div class="ctx-menu" id="chatMenu" hidden></div>
+
+<!-- Small prompt modal for group create/rename and chat rename. -->
+<div class="modal-veil" id="promptVeil" hidden>
+  <div class="modal small" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+    <header class="modal-head">
+      <h2 id="promptTitle">Rename</h2>
+      <button class="icon-btn" id="promptClose" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="settings prompt-body">
+      <div class="field">
+        <label id="promptLabel">Name</label>
+        <input type="text" id="promptInput" aria-labelledby="promptLabel" spellcheck="false">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <span class="spacer"></span>
+      <button class="btn" id="promptCancel">Cancel</button>
+      <button class="btn primary" id="promptSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- A newer release is available on GitHub. -->
+<div class="modal-veil update-veil" id="updateVeil" hidden>
+  <div class="modal update-modal" role="dialog" aria-modal="true" aria-labelledby="updateTitle">
+    <button class="icon-btn update-close" id="updateClose" title="Close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    <img class="update-mark" src="icon.png" alt="">
+    <h2 id="updateTitle">New update available</h2>
+    <p class="update-sub" id="updateSub">A new version of Skadi is ready to install.</p>
+    <div class="update-notes" id="updateNotes"></div>
+    <button class="btn primary update-go" id="updateGo">Update now</button>
+    <button class="update-later" id="updateLater" type="button">Maybe later</button>
+    <p class="update-more" id="updateMore"></p>
+  </div>
+</div>
+
+<!-- In-app confirm. Replaces the browser's native confirm() so every dialog stays inside Skadi. -->
+<div class="modal-veil" id="confirmVeil" hidden>
+  <div class="modal small" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <header class="modal-head">
+      <h2 id="confirmTitle">Confirm</h2>
+      <button class="icon-btn" id="confirmClose" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="settings confirm-body"><p id="confirmText"></p></div>
+    <div class="modal-actions">
+      <span class="spacer"></span>
+      <button class="btn" id="confirmCancel">Cancel</button>
+      <button class="btn primary" id="confirmOk">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Built-in folder picker. Browse drives and folders without leaving the app. -->
+<div class="modal-veil" id="folderVeil" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="folderTitle">
+    <header class="modal-head">
+      <h2 id="folderTitle">Choose project folder</h2>
+      <button class="icon-btn" id="folderClose" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="folder-body">
+      <div class="folder-places" id="folderPlaces"></div>
+      <div class="folder-nav">
+        <button class="btn tiny" id="folderUp" title="Go to parent folder">Up</button>
+        <input type="text" id="folderPath" aria-label="Current folder path" spellcheck="false" autocomplete="off">
+        <button class="btn tiny" id="folderGo">Go</button>
+      </div>
+      <div class="folder-list" id="folderList"></div>
+      <div class="folder-new">
+        <input type="text" id="folderNewName" placeholder="New folder name…" spellcheck="false" autocomplete="off">
+        <button class="btn tiny" id="folderMkdir">Create</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <span class="spacer"></span>
+      <button class="btn" id="folderCancel">Cancel</button>
+      <button class="btn primary" id="folderSelect">Select folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- File diff viewer. Opened from a file chip in a tool card. -->
+<div class="modal-veil" id="fileVeil" hidden>
+  <div class="modal wide tall file-viewer" role="dialog" aria-modal="true" aria-labelledby="fileTitle">
+    <header class="modal-head">
+      <h2 id="fileTitle">File</h2>
+      <span class="lang-pill" id="fileLang"></span>
+      <span class="count" id="fileStats"></span>
+      <div class="seg-toggle" id="fileMode" role="tablist" aria-label="What to show" hidden>
+        <button type="button" role="tab" data-mode="file">File</button>
+        <button type="button" role="tab" data-mode="diff">Changes</button>
+      </div>
+      <button class="icon-btn" id="fileClose" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="file-tabs" id="fileTabs" role="tablist"></div>
+    <div class="file-path" id="filePath"></div>
+    <div class="diff-body" id="fileBody"></div>
+    <div class="modal-actions">
+      <button class="btn" id="fileUndo" hidden>Undo this edit</button>
+      <button class="btn" id="fileRedo" hidden>Redo this edit</button>
+      <span class="spacer"></span>
+      <button class="btn" id="fileReveal" title="Open the containing folder in Explorer with this file selected">Open location</button>
+      <button class="btn" id="fileCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Review changes: one project's working tree, every changed file as a row
+     that opens into its diff. -->
+<div class="modal-veil" id="changesVeil" hidden>
+  <div class="modal wide tall review-modal" role="dialog" aria-modal="true" aria-labelledby="changesTitle">
+    <header class="modal-head review-head">
+      <button class="icon-btn" id="changesToggleAll" title="Collapse all" aria-label="Collapse all"><svg class="icon"><use href="#i-list"/></svg></button>
+      <select id="changesProject" class="review-project" title="Project" aria-label="Project"></select>
+      <h2 id="changesTitle">Working tree</h2>
+      <button class="icon-btn" id="changesSearchToggle" title="Filter files" aria-label="Filter files"><svg class="icon"><use href="#i-search"/></svg></button>
+      <button class="icon-btn" id="changesRefresh" title="Refresh" aria-label="Refresh"><svg class="icon"><use href="#i-restart"/></svg></button>
+      <button class="icon-btn" id="changesClose" title="Close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="review-search" id="changesSearchRow" hidden>
+      <input type="text" id="changesSearch" placeholder="Filter files" spellcheck="false" aria-label="Filter files">
+    </div>
+    <p class="review-note" id="changesNote" hidden>Files are collapsed for large diffs. Select a file to expand it.</p>
+    <div class="review-list" id="changesFiles"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

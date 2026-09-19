@@ -1,0 +1,51 @@
+# A release is an allowlist. Everything is ignored unless it is named here, so
+# whatever else lands in this folder -- chats, API keys, models, logs, the
+# engine, personal settings -- can never be committed by accident.
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/install.ps1
+!/package.json
+!/skadi.mjs
+!/src/
+!/ui/
+!/docs/
+!/tests/
+!/build/
+!/defaults/
+
+# ...and inside those folders, only what a release contains.
+/src/*
+!/src/*.mjs
+/ui/*
+!/ui/*.js
+!/ui/*.css
+!/ui/*.html
+!/ui/icon.png
+/ui/*-preview.html
+/ui/reference-test.html
+/ui/deploy.js
+/tests/*
+!/tests/*.test.mjs
+/build/*
+!/build/Skadi.cs
+!/build/build.ps1
+!/build/get-webview2.ps1
+!/build/make-icon.ps1
+!/build/skadi-icon.png
+!/build/skadi.ico
+/docs/*
+!/docs/*.md
+!/docs/*.png
+/defaults/*
+!/defaults/skills/
+/defaults/skills/*
+!/defaults/skills/*/
+/defaults/skills/*/*
+!/defaults/skills/*/SKILL.md
+
+# Maintainer tooling that is never part of a release.
+/src/publish.mjs
+/tests/publish.test.mjs
+/tests/github-push.test.mjs
