@@ -48,21 +48,26 @@ That one command:
 | **Node.js** | installs it with `winget` if you do not have version 20 or newer |
 | **Skadi** | downloads the app from this repository |
 | **Engine** | fetches [BeeLlama](https://github.com/Anbeeld/beellama.cpp), a llama.cpp build, for your GPU |
+| **Model** | downloads the [Qwen3.8-27B](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) quant that fits your VRAM, with its vision projector |
 | **Launcher** | builds `Skadi.exe` and adds Desktop and Start Menu shortcuts |
 
-It takes a minute: no model is downloaded. You pick and download one inside Skadi
-once it is open (see [Using Skadi](#using-skadi)), where it tells you whether a
-file will fit your GPU *before* you download it.
-
 No administrator rights needed. Run it again any time: finished downloads are
-skipped and your settings are kept.
+skipped, interrupted ones resume, and your settings are kept.
+
+| Your GPU memory | Model installed | Size |
+| --- | --- | --- |
+| 15 GB or more | Qwen3.8-27B **IQ3_S** + MTP | 12.1 GB |
+| 12 – 15 GB | Qwen3.8-27B IQ3_XXS + MTP | 10.4 GB |
+| 10 – 12 GB | Qwen3.8-27B IQ2_XS + MTP | 8.8 GB |
+| under 10 GB | none — pick a smaller model in the app | |
 
 Want to choose? Save the script, then:
 
 ```powershell
-.\install.ps1 -ModelsDir D:\models   # where Skadi will look for (and save) models
-.\install.ps1 -Backend cuda          # NVIDIA CUDA instead of Vulkan (larger download)
-.\install.ps1 -NoShortcuts           # skip the Desktop and Start Menu shortcuts
+.\install.ps1 -ModelsDir D:\models      # put the big files on another drive
+.\install.ps1 -Backend cuda             # NVIDIA CUDA instead of Vulkan (larger download)
+.\install.ps1 -Model iq3_xxs -NoVision  # pick the quant, skip the vision projector
+.\install.ps1 -Model none               # engine and app only
 ```
 
 <details>
@@ -79,7 +84,7 @@ browser inside the app can download anything from Hugging Face.
 
 </details>
 
-**Needs:** Windows 10 or 11, a GPU with 10 GB of VRAM or more for a 27B model
+**Needs:** Windows 10 or 11, a GPU with 10 GB of VRAM or more for the 27B model
 (any vendor — the default engine uses Vulkan), and the WebView2 runtime that
 ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
 
@@ -126,13 +131,9 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
 1. **Start it** from the Desktop shortcut (or `node skadi.mjs`).
 2. **Pick a project.** The folder icon under the prompt selects the directory the
    agent works in; **+** adds one.
-3. **Get a model, then load it.** Open **Local AI** in the top bar and choose
-   **Browse models**. The tuned profiles each have a **Get model** button that
-   opens the right Hugging Face page (the recommended one is Qwen3.8-27B IQ3_S,
-   about 12 GB), or search for any GGUF yourself; Skadi tells you whether a file
-   fits your GPU before you download it. Then pick the file and a profile (or
-   *Default settings*) and press **Load**. The forecast shows what it will cost
-   first.
+3. **Load a model.** Open **Local AI** in the top bar, pick the model file and a
+   profile (or *Default settings*), and press **Load**. The forecast shows what it
+   will cost first.
 4. **Ask for something.** *"Add a dark mode toggle to this page and check it in
    the browser."* Watch the tool calls stack up in one collapsible group; open it
    to read the reasoning and every command.
