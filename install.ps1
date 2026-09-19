@@ -1,16 +1,17 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Install Skadi with a local model, in one go.
+  Install Skadi and what it needs to run.
 .DESCRIPTION
-  Sets up everything Skadi needs to run a model on this PC:
+  Sets up everything Skadi needs on this PC, without downloading a model:
 
     1. Node.js 20+           installed with winget if it is missing
     2. Skadi itself          downloaded from GitHub (skipped when run from a clone)
     3. llama.cpp engine      the BeeLlama build, with the backend for your GPU
-    4. A model               the Qwen3.8-27B quant that fits your VRAM, plus its
-                             vision projector and chat template
-    5. Skadi.exe             built on this PC, with Desktop and Start Menu shortcuts
+    4. Skadi.exe             built on this PC, with Desktop and Start Menu shortcuts
+
+  Models are chosen and downloaded inside Skadi (Local AI > Browse models),
+  which shows whether a file will fit your GPU before you download it.
 
   Nothing needs administrator rights. Re-running it is safe: finished
   downloads are skipped, interrupted ones resume, and your config is kept.
@@ -23,16 +24,9 @@
 .PARAMETER Dir
   Where Skadi goes. Default: %LOCALAPPDATA%\Skadi, or the clone this script is in.
 .PARAMETER ModelsDir
-  Where models are saved. They are large; put them on the roomiest drive.
-  Default: <Dir>\models.
+  Where Skadi will look for models. Default: <Dir>\models.
 .PARAMETER Backend
   vulkan (default; any GPU), cuda (NVIDIA, larger download), hip (AMD ROCm) or cpu.
-.PARAMETER Model
-  auto (default: chosen by your VRAM), iq3_s, iq3_xxs, iq2_xs, iq2_s, or none.
-.PARAMETER VramGB
-  Tell the installer how much VRAM you have instead of detecting it.
-.PARAMETER NoVision
-  Skip the vision projector (about 0.9 GB).
 .PARAMETER NoShortcuts
   Do not create Desktop and Start Menu shortcuts.
 .PARAMETER NoLaunch
@@ -43,9 +37,6 @@ param(
   [string]$Dir = "",
   [string]$ModelsDir = "",
   [ValidateSet("vulkan", "cuda", "hip", "cpu")][string]$Backend = "vulkan",
-  [ValidateSet("auto", "iq3_s", "iq3_xxs", "iq2_xs", "iq2_s", "none")][string]$Model = "auto",
-  [double]$VramGB = 0,
-  [switch]$NoVision,
   [switch]$NoShortcuts,
   [switch]$NoLaunch
 )
@@ -56,7 +47,6 @@ $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is ~10x faster wi
 
 $Repo = "calinadrian/skadi"
 $EngineRepo = "Anbeeld/beellama.cpp"
-$ModelRepo = "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF"
 $TemplateUrl = "https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/resolve/main/chat_template.jinja"
 $UA = @{ "User-Agent" = "Skadi-installer" }
 
@@ -91,20 +81,6 @@ function Get-File($url, $dest, [long]$expected = 0) {
 
 function Refresh-Path {
   $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
-}
-
-function Get-VramGB {
-  $best = 0.0
-  $key = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-  foreach ($sub in (Get-ChildItem -LiteralPath $key -ErrorAction SilentlyContinue)) {
-    $v = (Get-ItemProperty -LiteralPath $sub.PSPath -ErrorAction SilentlyContinue)."HardwareInformation.qwMemorySize"
-    if ($v) {
-      if ($v -is [byte[]]) { $v = [BitConverter]::ToUInt64($v, 0) }
-      $gb = [double]$v / 1GB
-      if ($gb -gt $best) { $best = $gb }
-    }
-  }
-  return $best
 }
 
 Write-Host ""
@@ -200,61 +176,16 @@ if (Test-Path (Join-Path $engineDir "llama-server.exe")) {
   Info "$($rel.tag_name) -> $engineDir"
 }
 
-# ---------------------------------------------------------------- model -----
-Step "Model"
-$tiers = @(
-  @{ id = "iq3_s";   file = "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf";   min = 15; note = "IQ3_S + MTP  - best speed and quality; the recommended profile" },
-  @{ id = "iq3_xxs"; file = "Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf"; min = 12; note = "IQ3_XXS + MTP" },
-  @{ id = "iq2_xs";  file = "Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf";  min = 10; note = "IQ2_XS + MTP  - smallest that is still useful" },
-  @{ id = "iq2_s";   file = "Qwen3.8-27B-GSQ-RCO-IQ2_S-mtp.gguf";   min = 11; note = "IQ2_S + MTP" }
-)
-if ($VramGB -le 0) { $VramGB = [math]::Round((Get-VramGB), 1) }
-if ($VramGB -gt 0) { Info "GPU memory: $VramGB GB" } else { Warn "Could not read GPU memory." }
-
-$chosen = $null
-if ($Model -eq "none") {
-  Info "skipping the model (-Model none)"
-} elseif ($Model -ne "auto") {
-  $chosen = $tiers | Where-Object { $_.id -eq $Model } | Select-Object -First 1
-} elseif ($VramGB -ge 10) {
-  $chosen = $tiers | Where-Object { $_.id -ne "iq2_s" -and $_.min -le $VramGB } | Select-Object -First 1
-} elseif ($VramGB -gt 0) {
-  Warn "Under 10 GB of VRAM is too little for a 27B model. Skipping the download;"
-  Warn "pick a smaller model in Skadi (Local AI > Browse models) once it is open."
-} else {
-  $chosen = $tiers[1]
-  Warn "Unknown VRAM: choosing $($chosen.id). Re-run with -Model to change it."
-}
-
-$modelMeta = @{}
-if ($chosen) {
-  Info $chosen.note
-  $tree = Get-Json "https://huggingface.co/api/models/$ModelRepo/tree/main"
-  $sizes = @{}
-  foreach ($t in $tree) { if ($t.type -eq "file") { $sizes[$t.path] = [long]$t.size } }
-  if (-not $sizes.ContainsKey($chosen.file)) { Fail "$($chosen.file) is not in $ModelRepo any more." }
-  $gb = [math]::Round($sizes[$chosen.file] / 1GB + $(if ($NoVision) { 0 } else { 0.9 }), 1)
-  $drive = try { Split-Path -Qualifier $ModelsDir } catch { $null }
-  if ($drive) {
-    $free = (Get-PSDrive -Name $drive.TrimEnd(":") -ErrorAction SilentlyContinue).Free
-    if ($free -and $free / 1GB -lt $gb + 1) { Fail "$drive has $([math]::Round($free / 1GB, 1)) GB free; the model needs about $gb GB. Use -ModelsDir to pick another drive." }
-  }
-  Info "about $gb GB to download into $ModelsDir"
-  Get-File "https://huggingface.co/$ModelRepo/resolve/main/$($chosen.file)" (Join-Path $ModelsDir $chosen.file) $sizes[$chosen.file]
-  $vision = $null
-  if (-not $NoVision) {
-    $vision = "mmproj-Qwen3.8-27B-f16.gguf"
-    Get-File "https://huggingface.co/$ModelRepo/resolve/main/mmproj-Qwen3.8-27B-BF16.gguf" (Join-Path $ModelsDir $vision) $sizes["mmproj-Qwen3.8-27B-BF16.gguf"]
-  }
-  $modelMeta[$chosen.file] = @{ repo = $ModelRepo; mmproj = $vision; at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
-}
-
+# ------------------------------------------------------------- template -----
+Step "Chat template"
 $template = Join-Path $ModelsDir "chat_template.jinja"
-if (-not (Test-Path $template)) {
+if (Test-Path $template) {
+  Info "already have it"
+} else {
   try {
     New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
     Invoke-WebRequest -Uri $TemplateUrl -Headers $UA -OutFile $template
-    Info "chat template saved"
+    Info "saved to $template"
   } catch { Warn "Could not fetch the chat template ($($_.Exception.Message)). Skadi falls back to the model's own." }
 }
 
@@ -279,10 +210,6 @@ if (Test-Path $profiles) {
     profiles         = [ordered]@{}
   } | ConvertTo-Json -Depth 5 | ForEach-Object { Write-Text $profiles $_ }
   Info "wrote config\profiles.json"
-}
-if ($modelMeta.Count) {
-  $metaPath = Join-Path $configDir "models.json"
-  if (-not (Test-Path $metaPath)) { $modelMeta | ConvertTo-Json -Depth 4 | ForEach-Object { Write-Text $metaPath $_ } }
 }
 # Starter skills, only into an empty skills folder.
 $skillsDir = Join-Path $Dir "skills"
@@ -328,10 +255,8 @@ Write-Host "  Skadi is installed." -ForegroundColor Green
 Write-Host "    app      $Dir"
 Write-Host "    engine   $engineDir"
 Write-Host "    models   $ModelsDir"
-if ($chosen -and $chosen.id -ne "iq3_s") {
-  Write-Host ""
-  Write-Host "  Next: open Local AI, choose Load a model, pick $($chosen.file) and 'Default settings'." -ForegroundColor Yellow
-}
+Write-Host ""
+Write-Host "  Next: open Local AI, choose Browse models, and download one that fits your GPU." -ForegroundColor Yellow
 Write-Host ""
 
 if (-not $NoLaunch) {

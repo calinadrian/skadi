@@ -60,6 +60,7 @@ export const PROFILE_CATALOG = Object.freeze({
       "quant": "IQ3_S",
       "mtp": true,
       "engine": "BeeLlama",
+      "repo": "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
       "ppl": 3.63,
       "tps": [
         36,
@@ -236,6 +237,7 @@ export const PROFILE_CATALOG = Object.freeze({
       "quant": "IQ3_S",
       "mtp": true,
       "engine": "BeeLlama",
+      "repo": "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
       "ppl": 3.63,
       "tps": [
         15,
@@ -288,6 +290,7 @@ export const PROFILE_CATALOG = Object.freeze({
       "quant": "IQ3_S",
       "mtp": false,
       "engine": "BeeLlama",
+      "repo": "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
       "ppl": 3.63,
       "tps": [
         14,
