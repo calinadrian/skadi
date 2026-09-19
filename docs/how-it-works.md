@@ -216,10 +216,16 @@ the CPU's integrated graphics claiming 48 GB — which is system RAM wearing a
 GPU's hat. Left to itself llama.cpp splits across both, which looks like a fit
 and runs like a swap file.
 
-Every profile therefore names its device (`-dev`), and the fitter is given the
-same list. A profile with no `device` falls back to the discrete card, which is
+Every launch therefore passes a device (`-dev`), and the fitter is given the
+same one. A profile with no `device` falls back to the discrete card, which is
 the one with real, bounded memory; `device: "auto"` is the explicit opt-out for
 when you do want everything.
+
+Device ids belong to the backend — `Vulkan0` under the Vulkan build, `CUDA0`
+under CUDA — so the bundled profiles name none, and a saved profile that names
+one this engine does not have is treated as unset (`resolveDevice` in
+`src/llama.mjs`). That is what lets the same profiles run on AMD or NVIDIA,
+whichever engine `install.ps1 -Backend` fetched.
 
 ### Cache types are per build
 

@@ -26,6 +26,21 @@ export function visionOn(profile) {
 }
 
 /**
+ * The device a profile should run on: the one it names, or the discrete card.
+ *
+ * A named device only counts if this build actually has it. Device ids belong to
+ * the backend (`Vulkan0`, `CUDA0`), so a profile saved under one engine names a
+ * device that does not exist under another, and passing it through makes
+ * llama-server refuse to start. `devices` is the probed id list; when it is
+ * unknown the name is trusted, since guessing wrong would be worse than asking.
+ */
+export function resolveDevice(profile, { defaultDevice, devices } = {}) {
+  if (profile.device === 'auto') return undefined;
+  if (profile.device && (!devices?.length || devices.includes(profile.device))) return profile.device;
+  return defaultDevice;
+}
+
+/**
  * Translate a profile into llama-server arguments.
  * Flags are only emitted when the profile actually sets them, so an unset field
  * means "let llama.cpp choose" rather than "send a zero".
@@ -53,7 +68,7 @@ export function buildArgs(cfg, profile, modelFile, opts = {}) {
   // 'auto' is the explicit opt-out: hand llama.cpp every device it can find.
   // Anything else names a device; unset falls back to the discrete card, which
   // is what you want often enough that it should not need saying.
-  push('-dev', profile.device === 'auto' ? undefined : profile.device || opts.defaultDevice);
+  push('-dev', resolveDevice(profile, opts));
   push('-sm', profile.splitMode);
   push('-mg', profile.mainGpu);
   push('-c', profile.ctx);
@@ -278,7 +293,7 @@ export function fitParamsExe(serverExe) {
 const FIT_PARAM_FLAGS = [
   // The device list first: fitting against a different set of GPUs than the
   // server will use makes the answer meaningless.
-  ['-dev', (p, cfg, opts) => (p.device === 'auto' ? undefined : p.device || opts.defaultDevice)],
+  ['-dev', (p, cfg, opts) => resolveDevice(p, opts)],
   ['-sm', (p) => p.splitMode],
   ['-mg', (p) => p.mainGpu],
   // Omitted entirely when vision is switched off, so the fit reflects the
@@ -319,13 +334,13 @@ const FIT_PARAM_FLAGS = [
  * arguments you did not set.
  */
 export async function fitWithLlamaCpp(cfg, profile, modelFile, opts = {}) {
-  const { targetMiB = 1024, ctxFloor = 4096, decide = ['ngl', 'ncmoe'], defaultDevice } = opts;
+  const { targetMiB = 1024, ctxFloor = 4096, decide = ['ngl', 'ncmoe'], defaultDevice, devices } = opts;
   const exe = fitParamsExe(exeFor(cfg, profile));
   if (!existsSync(exe)) return { available: false, reason: `llama-fit-params not found: ${exe}` };
 
   const args = ['-m', modelFile];
   for (const [flag, read] of FIT_PARAM_FLAGS) {
-    const value = read(profile, cfg, { defaultDevice });
+    const value = read(profile, cfg, { defaultDevice, devices });
     if (value !== undefined && value !== null && value !== '') args.push(flag, String(value));
   }
   if (!decide.includes('ctx') && profile.ctx) args.push('-c', String(profile.ctx));

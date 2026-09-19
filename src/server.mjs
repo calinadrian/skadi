@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 
 import { ROOT, loadConfig, saveConfig, loadSettings, saveSettings, resetSettings, DEFAULT_SETTINGS, modelPath, loadModelMeta, saveModelMeta } from './config.mjs';
 import { VramMonitor } from './vram.mjs';
-import { LlamaServer, portIsFree, buildArgs, pidListeningOn, probeCapabilities, probeDevices, fitWithLlamaCpp, visionOn, exeFor } from './llama.mjs';
+import { LlamaServer, portIsFree, buildArgs, pidListeningOn, probeCapabilities, probeDevices, resolveDevice, fitWithLlamaCpp, visionOn, exeFor } from './llama.mjs';
 import { searchModels, repoDetail, remoteShape, assessFit, quantOf, DownloadManager } from './huggingface.mjs';
 import { catalogFor, CATALOG_VRAM_GB } from './profile-catalog.mjs';
 import { readGgufMetadata, modelShape, estimateFootprint, maxContextFor, suggestProfile, fitProfile } from './gguf.mjs';
@@ -1072,10 +1072,12 @@ export class Skadi {
   /** The margin arguments handed to llama.cpp's own fitter, kept in step with ours. */
   async fitArgs() {
     const { reserve } = await this.budgetBytes();
+    const { devices, defaultDevice } = await this.deviceInfo();
     return {
       fitTargetMiB: Math.round(reserve / 1024 / 1024) || undefined,
       fitCtxFloor: Number(this.settings.ctxFloor) || undefined,
-      defaultDevice: (await probeDevices(this.exeForActive()))?.discrete?.id,
+      defaultDevice: defaultDevice || undefined,
+      devices: devices.map((d) => d.id),
     };
   }
 
@@ -1120,7 +1122,8 @@ export class Skadi {
       // whatever it takes to bring its optimistic view down to the budget the
       // committed-memory counters support.
       const { devices, defaultDevice } = await this.deviceInfo();
-      const targetId = profile.device && profile.device !== 'auto' ? profile.device : defaultDevice;
+      const deviceIds = devices.map((d) => d.id);
+      const targetId = resolveDevice(profile, { defaultDevice, devices: deviceIds });
       const vulkanFreeMiB = devices.find((d) => d.id === targetId)?.freeMiB ?? 0;
       const budgetMiB = Math.floor(budget / 1024 / 1024);
       const reconcileMiB = vulkanFreeMiB ? Math.max(vulkanFreeMiB - budgetMiB, 0) : 0;
@@ -1131,7 +1134,8 @@ export class Skadi {
             invisibleMiB,
           ctxFloor: options.ctxFloor,
           decide,
-          defaultDevice: (await probeDevices(this.config.serverExe))?.discrete?.id,
+          defaultDevice: defaultDevice || undefined,
+          devices: deviceIds,
         });
 
       // -ngl is always left for llama.cpp to choose, even when CPU layers are
