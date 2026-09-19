@@ -110,6 +110,7 @@ const state = {
   ctxUsed: null, // estimated context tokens in the open session
   ctxLimit: null, // window they are measured against
   attachments: [],
+  webSearch: true,
   browserStream: null,
   tasks: [],
   undo: [], // this session's file-edit undo entries {callId, path, added, removed, at}
@@ -139,6 +140,8 @@ state.localModels = [];
 // (a profile id, or 'default').
 state.loadModel = null;
 state.loadProfile = null;
+// Models whose default profile is being made right now.
+state.defaulting = new Set();
 // "model|profile" keys of loads in flight, so a second click cannot double-launch.
 state.loading = new Set();
 state.vramByModel = new Map();
@@ -713,6 +716,7 @@ function toolLabel(name, args) {
     case 'browser_read': case 'browser_elements': return { verb: 'Read the page' };
     case 'browser_console': return { verb: 'Read the browser console' };
     case 'browser_eval': return { verb: 'Ran page script' };
+    case 'web_search': return { verb: 'Searched the web', target: args?.query || '' };
     case 'task_log': return { verb: 'Read a task log' };
     case 'task_stop': return { verb: 'Stopped a task' };
     case 'result': return { verb: 'Result' };
@@ -3383,10 +3387,23 @@ function followChatChoice(session) {
   const known = session?.provider && state.providers.some((p) => p.id === session.provider);
   state.chatProvider = known ? session.provider : null;
   state.chatModel = known ? session.model || null : null;
+  state.webSearch = session ? session.webSearch !== false : true;
+  renderWebSearchToggle();
   closeModelMenu();
   applyProviderVisibility();
   renderEffort();
   refreshChatInfo();
+}
+
+function renderWebSearchToggle() {
+  const button = $('btnWebSearch');
+  if (!button) return;
+  const enabled = state.webSearch !== false;
+  button.classList.toggle('active', enabled);
+  button.setAttribute('aria-pressed', String(enabled));
+  button.setAttribute('aria-label', `${enabled ? 'Disable' : 'Enable'} web search for this chat`);
+  button.title = `Web search ${enabled ? 'enabled' : 'disabled'} for this chat`;
+  button.disabled = isBusy();
 }
 
 /** Forget a chat's draft: it is being deleted, not left. */
@@ -4184,6 +4201,7 @@ function setBusy(busy) {
   // Compact mid-turn is a 409 (the transcript is moving under it); make that
   // unpressable instead of answering with a red error.
   $('btnCompact').disabled = busy;
+  $('btnWebSearch').disabled = busy;
   // The composer's send button flips into the stop control: same button,
   // different role — red square while a turn runs, accent arrow when idle.
   const send = $('btnSend');
@@ -4497,6 +4515,12 @@ function connect() {
     // Another chat's browser: its status is none of this pane's business.
     if (s.key && s.key !== browserKey()) return;
     applyBrowserStatus(s);
+  });
+
+  es.addEventListener('web_search_status', (e) => {
+    const status = JSON.parse(e.data);
+    if (status.state === 'ready') toast(`Local SearXNG is ready at ${status.url}`);
+    if (status.state === 'error') toast(status.error || 'Local SearXNG failed to start.');
   });
 
   // A draft chat was saved: its browser moved onto the new session id.
@@ -5441,6 +5465,22 @@ $('modeSelect').onchange = guard(async () => {
   await setMode($('modeSelect').value);
 });
 
+$('btnWebSearch').onclick = guard(async () => {
+  if (isBusy()) return;
+  const previous = state.webSearch;
+  state.webSearch = !state.webSearch;
+  renderWebSearchToggle();
+  try {
+    if (state.sessionId) {
+      await api('session/web-search', { id: state.sessionId, enabled: state.webSearch });
+    }
+  } catch (error) {
+    state.webSearch = previous;
+    renderWebSearchToggle();
+    throw error;
+  }
+});
+
 $('btnAddProject').onclick = () => {
   const start = state.projects.find((p) => p.id === state.activeProject)?.path || null;
   openFolderBrowser(start, guard(async (path) => {
@@ -6229,7 +6269,19 @@ function renderLoadArea() {
     }
     group.append(option(id, p.label || id, sub, isLoaded(id) ? 'loaded' : null, actions));
   }
-  group.append(option('default', 'Default settings', 'Sized to the memory you have free. Not kept unless you save them.'));
+  // A model with no profile of its own gets a default one, made for it, so the
+  // Profile and Forecast panels never describe some other model's settings.
+  // Once it exists it is listed above as its own row.
+  if (!profiles.length) {
+    group.append(option('default', 'Default settings', 'Sized to the memory you have free. Not kept unless you save them.'));
+    const model = state.loadModel;
+    if (!state.defaulting.has(model)) {
+      state.defaulting.add(model);
+      guard(async () => {
+        try { await chooseLoadProfile('default'); } finally { state.defaulting.delete(model); }
+      })();
+    }
+  }
 
   // Ways to get more settings than these.
   const links = $('loadLinks');
@@ -6269,9 +6321,18 @@ async function saveProfile(id) {
 $('btnSaveProfile').onclick = guard(async () => saveProfile(state.editing));
 
 async function chooseLoadProfile(value) {
+  if (value === 'default') {
+    // Build (or reuse) this model's unsaved default profile and show that.
+    const model = state.loadModel;
+    const res = await api('profile/defaults', { model });
+    state.config = res.config;
+    if (state.loadModel !== model) return;
+    await selectProfile(res.profileId);
+    renderLoadArea();
+    return;
+  }
   state.loadProfile = value;
-  if (value !== 'default') await selectProfile(value);
-  else renderLoadArea();
+  await selectProfile(value);
 }
 
 $('loadModel').onchange = guard(async () => {
@@ -6483,6 +6544,7 @@ $('composer').onsubmit = (e) => {
     // The chat's own pick, so a chat runs on the provider it shows.
     provider: chatProviderId(),
     model: chatProvider()?.managed ? chatProvider()?.instance || null : chatProvider()?.model || null,
+    webSearch: state.webSearch,
   })
     .then(() => {
       // The server answers 202 before the session file lands; if the
@@ -7516,6 +7578,42 @@ function renderSettingsPane() {
     icon: 'stop',
     label: 'Command timeout',
     desc: 'Seconds before a single shell command is killed.',
+  });
+  addRow(agent, {
+    key: 'webSearchProvider',
+    type: 'select',
+    icon: 'globe',
+    label: 'Web search',
+    desc: 'DuckDuckGo works without setup. SearXNG uses your own instance.',
+    options: [['duckduckgo', 'DuckDuckGo'], ['searxng', 'SearXNG']],
+  });
+  addRow(agent, {
+    key: 'searxngUrl',
+    type: 'text',
+    icon: 'globe',
+    label: 'SearXNG URL',
+    desc: 'Base URL of your SearXNG instance, for example http://localhost:8080.',
+  });
+  addRow(agent, {
+    key: 'searxngAutoStart',
+    type: 'toggle',
+    icon: 'globe',
+    label: 'Run SearXNG with Skadi',
+    desc: 'Start and use a private local SearXNG container with Docker when Skadi runs. The first run downloads the image.',
+  });
+  addRow(agent, {
+    key: 'searxngPort',
+    type: 'number',
+    icon: 'globe',
+    label: 'Local SearXNG port',
+    desc: 'Port for the bundled SearXNG service. Defaults to 8888.',
+  });
+  addRow(agent, {
+    key: 'webSearchResults',
+    type: 'number',
+    icon: 'globe',
+    label: 'Search results',
+    desc: 'Default number returned to the agent (1–10).',
   });
 
   // ---- Memory --------------------------------------------------------------------

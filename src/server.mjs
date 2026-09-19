@@ -15,6 +15,8 @@ import { searchModels, repoDetail, remoteShape, assessFit, quantOf, DownloadMana
 import { catalogFor, CATALOG_VRAM_GB } from './profile-catalog.mjs';
 import { readGgufMetadata, modelShape, estimateFootprint, maxContextFor, suggestProfile, fitProfile } from './gguf.mjs';
 import { buildTools, toolSchemas, safePath } from './tools.mjs';
+import { buildWebSearchTools } from './web-search.mjs';
+import { LocalSearxng } from './searxng.mjs';
 import { listDirectory, readProjectFile, findFiles } from './files.mjs';
 import { TaskManager } from './tasks.mjs';
 import { gitStatus, gitDiff } from './git.mjs';
@@ -298,6 +300,13 @@ export class Skadi {
     this.memory = new MemoryStore(join(ROOT, 'memory'));
     this.sessions = new SessionStore(join(ROOT, 'sessions'));
     this.clients = new Set();
+    this.localSearxng = new LocalSearxng({
+      onStatus: (status) => {
+        this.webSearchStatus = status;
+        this.broadcast('web_search_status', status);
+      },
+    });
+    this.webSearchStatus = this.localSearxng.state;
     this.pendingApprovals = new Map();
     // Live turns, keyed by session id. One chat, one turn -- but several
     // chats can run at once, each with its own agent, transcript and tools.
@@ -697,6 +706,13 @@ export class Skadi {
     });
     // Sits beside the model in modelsDir, so the file name is enough.
     if (mmproj) Object.assign(suggested, { mmproj, vision: true });
+    // Prism's ternary types (PQ2_0, PTQ1_0) only exist in the PrismML fork, and
+    // its CPU repack of them segfaults on load, so -nr keeps the weights as-is.
+    const prism = this.config.engines?.prism;
+    if (prism && /PQ2_0|PTQ1_0/i.test(basename(file))) {
+      suggested.serverExe = prism;
+      suggested.extraArgs = [...(suggested.extraArgs || []), '-nr'];
+    }
     // Default settings a model is loaded with are not kept unless asked: they
     // live until the model is ejected, and the Save button makes them a profile.
     if (temporary) suggested.temporary = true;
@@ -1680,7 +1696,7 @@ export class Skadi {
     return alt;
   }
 
-  async makeAgent(provider, model) {
+  async makeAgent(provider, model, { webSearch = true } = {}) {
     const ctx = {
       workspace: this.workspace,
       settings: this.settings,
@@ -1695,6 +1711,7 @@ export class Skadi {
     let self = null;
     const tools = {
       ...buildTools(ctx),
+      ...(webSearch ? buildWebSearchTools(ctx) : {}),
       ...skillTools(this.skills),
       ...memoryTools(this.memory),
       ...browserTools(() => this.getBrowser(ctx.sessionId), {
@@ -1908,6 +1925,7 @@ export class Skadi {
       else delete session.model;
     } else session.model = provider.model;
 
+    session.webSearch = opts.webSearch == null ? session.webSearch !== false : opts.webSearch !== false;
     this.appendUserMessage(session, text, uploads, provider);
 
     // Persist the turn before the run starts: if the app restarts, crashes
@@ -1919,7 +1937,7 @@ export class Skadi {
     // has just created by sending into it, so nothing else may borrow it.
     this.broadcast('agent_session', { id: session.id, title: session.title });
 
-    const agent = await this.makeAgent(provider, model);
+    const agent = await this.makeAgent(provider, model, { webSearch: session.webSearch });
     // Per-turn tool context: background tasks tag this session, and file
     // edits push undo snapshots here (capped; before-images clipped). They
     // ride along in the session file so Undo survives a restart.
@@ -2295,6 +2313,17 @@ export class Skadi {
           saveConfig(this.config);
           return json(200, { profileId: made.profileId, config: this.config });
         }
+        case 'POST profile/defaults': {
+          // The unsaved default-settings profile for a model file, so the
+          // Profile and Forecast panels describe that model before it loads.
+          const { model } = await readBody();
+          try {
+            const profileId = await this.defaultProfileForModel(String(model || ''));
+            return json(200, { profileId, config: this.config });
+          } catch (err) {
+            return json(404, { error: err.message });
+          }
+        }
         case 'GET models/local':
           return json(200, await this.localModels());
         case 'POST model/load': {
@@ -2466,6 +2495,15 @@ export class Skadi {
           apply(session);
           await this.sessions.save(session, { touch: false });
           return json(200, { provider: session.provider, model: session.model ?? null });
+        }
+        case 'POST session/web-search': {
+          const { id, enabled } = await readBody();
+          const live = this.turns.get(id);
+          if (live) return json(409, { error: 'Web search cannot change while this chat is running.' });
+          const session = await this.sessions.get(id);
+          session.webSearch = Boolean(enabled);
+          await this.sessions.save(session, { touch: false });
+          return json(200, { webSearch: session.webSearch });
         }
         case 'GET provider/models': {
           const id = url.searchParams.get('id');
@@ -2933,7 +2971,7 @@ export class Skadi {
         // ---- the turn ----------------------------------------------------
         case 'POST chat': {
           const {
-            sessionId, draftKey, message, attachments = [], effort = 'default', provider, model,
+            sessionId, draftKey, message, attachments = [], effort = 'default', provider, model, webSearch = true,
           } = await readBody();
           json(202, { accepted: true, attachments: describeAttachments(attachments) });
           // The chat a failure belongs to. For a brand-new chat that is not
@@ -2946,7 +2984,7 @@ export class Skadi {
           // end left the rail pulsing “working…” over a chat that had
           // finished. The turn announces itself at the start, and the window
           // refreshes the row from `agent_done`.
-          this.chat(sessionId, message, attachments, { effort, onSession, draftKey, provider, model }).catch((err) => {
+          this.chat(sessionId, message, attachments, { effort, onSession, draftKey, provider, model, webSearch }).catch((err) => {
             // Also log it: a turn can fail with no browser attached, and a
             // silent failure is the hardest kind to debug.
             console.error('[agent]', err.message);
@@ -2975,6 +3013,7 @@ export class Skadi {
         }
         case 'POST settings':
           this.settings = saveSettings(await readBody());
+          this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
           // The running agent holds the old object; hand it the new one so a
           // mid-session permission-mode switch (or any other tweak) applies to
           // the very next tool call instead of the next turn.
@@ -2982,6 +3021,7 @@ export class Skadi {
           return json(200, this.settings);
         case 'POST settings/reset':
           this.settings = resetSettings();
+          this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
           for (const t of this.turns.values()) t.agent.settings = this.settings;
           return json(200, this.settings);
 
@@ -3034,6 +3074,7 @@ export class Skadi {
     // whatever it last inferred -- and a chat stuck "running" is a composer
     // that never comes back.
     res.write(`event: turns\ndata: ${JSON.stringify({ sessionIds: [...this.turns.keys()] })}\n\n`);
+    res.write(`event: web_search_status\ndata: ${JSON.stringify(this.webSearchStatus)}\n\n`);
 
     const keepAlive = setInterval(() => res.write(': ping\n\n'), 20000);
     req.on('close', () => {
@@ -3093,6 +3134,7 @@ export class Skadi {
     this.port = port;
     this.vram.start();
     this.startUpdateChecks();
+    this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
     const server = createServer((req, res) => {
       const url = new URL(req.url, `http://${req.headers.host}`);
       if (url.pathname === '/api/events') return this.handleEvents(req, res);
@@ -3116,6 +3158,7 @@ export class Skadi {
 
   async shutdown() {
     this.vram.stop();
+    await this.localSearxng.stop();
     await Promise.all([...this.browsers.values()].map((b) => b.close().catch(() => {})));
     this.browsers.clear();
     await this.stopServer();

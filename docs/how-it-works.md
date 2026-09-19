@@ -442,8 +442,22 @@ line counts only.
 ## Tools
 
 `read_file`, `write_file`, `edit_file`, `delete_file`, `list_dir`, `glob`,
-`grep`, `run_command`, the `browser_*` set, plus `load_skill` / `save_skill` and
+`grep`, `run_command`, `web_search`, the `browser_*` set, plus `load_skill` / `save_skill` and
 `remember` / `recall` / `forget`.
+
+`web_search` uses DuckDuckGo by default, with no API key or account. In
+**Settings → Agent**, it can instead use the JSON API of a self-hosted SearXNG
+instance. Both backends return compact titles, source URLs and snippets.
+Enable **Run SearXNG with Skadi** to have the app launch a private local
+`searxng/searxng` Docker container on startup and stop it on shutdown. The first
+start downloads the image; the feature stays completely off until enabled.
+The globe button in the composer controls whether `web_search` is available in
+that chat. The choice is stored with the session, and the button is locked while
+a turn is running so its tool set cannot change halfway through the loop.
+
+The bundled `web-research` skill teaches the agent to prefer primary sources,
+check freshness, corroborate consequential claims, keep private data out of
+queries, and attach traceable links near the conclusions they support.
 
 Every path is resolved inside the project root and paths that escape it are
 rejected. A Claude-style **permission mode** picker below the prompt bar (or

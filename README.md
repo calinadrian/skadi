@@ -101,6 +101,10 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
 **An agent that can actually work**
 - **File and shell tools** confined to the project folder you choose: read, write,
   edit, glob, grep, run commands.
+- **Free web search** through DuckDuckGo out of the box, or your own SearXNG
+  instance — no paid search API key required. If Docker is available, Skadi can
+  also start and stop a private SearXNG container alongside the app. The globe
+  button in the composer enables or disables search separately for each chat.
 - **Permission modes** from *Manual* to *Auto*, so you decide what runs unasked.
 - **Undo and redo** every file a chat wrote — one file, or the whole chat.
 - **An embedded browser** per chat, driven by you and the agent together; the agent

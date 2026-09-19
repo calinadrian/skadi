@@ -27,6 +27,13 @@ export const DEFAULT_SETTINGS = {
   maxToolRounds: 24,
   // Seconds before a single shell command is killed.
   commandTimeoutSec: 120,
+  // Free, keyless agent web search. DuckDuckGo needs no setup; SearXNG points
+  // at a user-owned instance and uses its JSON search API.
+  webSearchProvider: 'duckduckgo',
+  searxngUrl: '',
+  searxngAutoStart: false,
+  searxngPort: 8888,
+  webSearchResults: 6,
   // Require explicit approval in the UI before write_file / edit_file / run_command.
   approveWrites: true,
   approveCommands: true,

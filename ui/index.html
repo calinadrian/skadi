@@ -187,6 +187,10 @@
             <button type="button" class="icon-btn attach-btn" id="btnAttach" title="Attach files or a folder">
               <svg class="icon"><use href="#i-clip"/></svg>
             </button>
+            <button type="button" class="icon-btn web-search-toggle active" id="btnWebSearch"
+              title="Web search enabled for this chat" aria-label="Disable web search for this chat" aria-pressed="true">
+              <svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>
+            </button>
             <select id="modeSelect" class="effort-select mode-select" aria-label="Permission mode" title="Permission mode — what the agent may do without asking"></select>
           </div>
           <div class="bar-group">
@@ -363,17 +367,6 @@
     </section>
 
     <section class="panel local-only">
-      <header class="panel-head"><h2>Forecast</h2><span class="tag" id="estApprox" hidden>approximate</span></header>
-      <table class="kv" id="estimateTable"></table>
-      <div class="callout" id="verdict"></div>
-      <div class="fit-row">
-        <button id="btnFit" class="btn">Fit to VRAM</button>
-        <span class="hint" id="fitHint"></span>
-      </div>
-      <p class="hint" id="estNotes"></p>
-    </section>
-
-    <section class="panel local-only">
       <header class="panel-head">
         <h2>Profile</h2>
         <button class="icon-btn" id="btnLoadModel" title="New profile with default settings"><svg class="icon"><use href="#i-plus"/></svg></button>
@@ -396,6 +389,17 @@
         <button id="btnRestart" class="btn"><svg class="icon"><use href="#i-restart"/></svg>Apply &amp; restart</button>
       </div>
       <p class="hint">Changes save and re-forecast immediately. They reach the model when you press <em>Apply &amp; restart</em>.</p>
+    </section>
+
+    <section class="panel local-only">
+      <header class="panel-head"><h2>Forecast</h2><span class="tag" id="estApprox" hidden>approximate</span></header>
+      <table class="kv" id="estimateTable"></table>
+      <div class="callout" id="verdict"></div>
+      <div class="fit-row">
+        <button id="btnFit" class="btn">Fit to VRAM</button>
+        <span class="hint" id="fitHint"></span>
+      </div>
+      <p class="hint" id="estNotes"></p>
     </section>
 
     <section class="panel">
