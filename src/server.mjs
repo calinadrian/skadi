@@ -387,6 +387,8 @@ export class Skadi {
       model: profile.model || profile.modelPath || null,
       ctx: profile.ctx ?? null,
       vram: mine,
+      // For a load that failed: the build it used, so the window can offer the others.
+      engine: inst.state === 'error' ? (profile.serverExe || this.config.serverExe) : undefined,
     };
   }
 
@@ -1290,6 +1292,30 @@ export class Skadi {
     return { ...this.instanceView(inst), fitNote };
   }
 
+  /**
+   * The llama-server builds on this machine: the configured one, any a profile
+   * names, and the ones sitting beside it (D:/AI/llama.cpp, D:/AI/prism-llama.cpp...).
+   * Forks are not interchangeable -- some formats only load on one -- so the
+   * profile lets you say which to use.
+   */
+  engines() {
+    const found = new Map();
+    const add = (path) => {
+      const norm = String(path || '').replace(/\\/g, '/');
+      if (!norm || found.has(norm.toLowerCase()) || !existsSync(norm)) return;
+      found.set(norm.toLowerCase(), { path: norm, name: norm.split('/').slice(-2, -1)[0] || norm });
+    };
+    add(this.config.serverExe);
+    for (const p of Object.values(this.config.profiles)) add(p.serverExe);
+    try {
+      const parent = dirname(dirname(String(this.config.serverExe || '')));
+      for (const entry of readdirSync(parent, { withFileTypes: true })) {
+        if (entry.isDirectory()) add(join(parent, entry.name, 'llama-server.exe'));
+      }
+    } catch { /* no sibling folder to look in */ }
+    return [...found.values()];
+  }
+
   /** The lowest port from the configured one up that nothing is listening on. */
   async freePort() {
     const taken = new Set([...this.instances.values()].filter((i) => i.proc).map((i) => i.port));
@@ -1300,12 +1326,12 @@ export class Skadi {
   }
 
   /** Unload one model -- or, with no id, every one Skadi started. */
-  async stopServer(id) {
+  async stopServer(id, { keepTemporary = false } = {}) {
     const targets = id ? [this.instances.get(id)].filter(Boolean) : [...this.instances.values()];
     await Promise.all(targets.map(async (inst) => {
       await inst.stop();
       this.instances.delete(inst.id);
-      this.dropIfTemporary(inst.id);
+      if (!keepTemporary) this.dropIfTemporary(inst.id);
       // The window keeps a card for every id it has heard of until told otherwise.
       this.broadcast('server_state', { ...this.instanceView(inst), state: 'stopped', removed: true });
     }));
@@ -2154,11 +2180,11 @@ export class Skadi {
           return res.end(String(process.pid));
         // ---- updates from GitHub -------------------------------------------
         case 'GET update/status':
-          return json(200, await this.updateStatus());
+          return json(200, await this.updateStatus({ passive: true }));
         case 'POST update/check':
           return json(200, await this.updateStatus({ force: true }));
         case 'POST update/apply': {
-          if (!this.updatesEnabled()) return json(403, { error: 'Updates are not available in this installation.' });
+          if (!this.canInstallUpdates()) return json(403, { error: 'Automatic installation is disabled in the development checkout.' });
           if (req.headers.origin && req.headers.origin !== url.origin) return json(403, { error: 'Origin mismatch.' });
           if (!req.headers['content-type']?.startsWith('application/json')) return json(415, { error: 'JSON required.' });
           if ((await readBody()).confirm !== 'UPDATE') return json(400, { error: 'Confirmation required.' });
@@ -2240,7 +2266,8 @@ export class Skadi {
         }
         case 'POST server/restart': {
           const { profileId } = await readBody();
-          await this.stopServer(profileId);
+          // Restarting is not ejecting: default settings survive it.
+          await this.stopServer(profileId, { keepTemporary: true });
           return json(200, await this.startServer(profileId));
         }
 
@@ -2288,6 +2315,8 @@ export class Skadi {
         }
         case 'GET catalog':
           return json(200, this.catalogView());
+        case 'GET engines':
+          return json(200, { engines: this.engines(), default: this.config.serverExe });
         case 'POST catalog/import':
         case 'POST catalog/remove': {
           const { profileId } = await readBody();
@@ -3083,29 +3112,36 @@ export class Skadi {
     });
   }
 
-  /** Updates replace files in place, which is the wrong thing to do to a tree that is edited by hand. */
-  updatesEnabled() {
-    return !canPublish() && this.settings.updateCheck !== false;
+  /** Installing replaces source files, so the development checkout may check but not self-update. */
+  canInstallUpdates() {
+    return !canPublish();
   }
 
-  async updateStatus({ force = false } = {}) {
+  async updateStatus({ force = false, passive = false } = {}) {
     const installed = await installedVersion();
-    if (!this.updatesEnabled()) return { enabled: false, current: installed };
+    if (passive && this.settings.updateCheck === false) {
+      return {
+        enabled: true,
+        installable: this.canInstallUpdates(),
+        current: installed,
+        ...(this.lastUpdate || {}),
+      };
+    }
     try {
       const result = await checkForUpdate({ force });
       this.lastUpdate = result;
       this.broadcast('update', { available: result.available });
-      return { enabled: true, ...result };
+      return { enabled: true, installable: this.canInstallUpdates(), ...result };
     } catch (err) {
       // A network that is down is not news; say so only to a person who asked.
-      if (force) return { enabled: true, current: installed, error: err.message };
-      return { enabled: true, current: installed, ...(this.lastUpdate || {}), error: err.message };
+      if (force) return { enabled: true, installable: this.canInstallUpdates(), current: installed, error: err.message };
+      return { enabled: true, installable: this.canInstallUpdates(), current: installed, ...(this.lastUpdate || {}), error: err.message };
     }
   }
 
   /** Look for updates shortly after start and every few hours after that. */
   startUpdateChecks() {
-    if (!this.updatesEnabled()) return;
+    if (this.settings.updateCheck === false) return;
     const check = () => this.updateStatus().catch(() => {});
     setTimeout(check, 20_000).unref();
     setInterval(check, 6 * 60 * 60 * 1000).unref();

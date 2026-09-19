@@ -145,6 +145,8 @@ state.defaulting = new Set();
 // "model|profile" keys of loads in flight, so a second click cannot double-launch.
 state.loading = new Set();
 state.vramByModel = new Map();
+// The llama-server builds on this machine, for the profile's Engine setting.
+state.engines = [];
 
 const chatProviderId = () => state.chatProvider || state.activeProvider;
 
@@ -2791,10 +2793,16 @@ function renderVram(v) {
 function setInstances(list) {
   state.instances = new Map((list || []).map((i) => [i.id, i]));
   renderInstances();
+  // A failed load offers the other builds; the list of them may not be known yet.
+  if ((list || []).some((i) => i.state === 'error') && !state.engines.length) {
+    refreshEngines().then(() => renderInstances());
+  }
 }
 
 /** One model changed state. A stopped one is gone; anything else replaces its card. */
 function applyInstance(view) {
+  // A failed load offers the other builds; the list of them may not be known yet.
+  if (view.state === 'error' && !state.engines.length) refreshEngines().then(() => renderInstances());
   if (view.removed || view.state === 'stopped') state.instances.delete(view.id);
   else state.instances.set(view.id, view);
   renderInstances();
@@ -2860,7 +2868,7 @@ function renderLoadedList(all) {
     const facts = el('span', 'loaded-facts');
     facts.dataset.id = inst.id;
     main.append(facts);
-    if (inst.state === 'error' && inst.lastError) main.append(el('span', 'loaded-error', inst.lastError.slice(0, 160)));
+    if (inst.state === 'error' && inst.lastError) main.append(el('span', 'loaded-error', inst.lastError.slice(0, 420)));
     main.onclick = () => { if (!inst.external) guard(() => selectProfile(inst.id))(); };
 
     const eject = el('button', 'btn tiny loaded-eject', inst.state === 'error' ? 'Dismiss' : 'Eject');
@@ -2876,9 +2884,35 @@ function renderLoadedList(all) {
       });
     }
     card.append(main, eject);
+    // A load can fail because of the build, not the model. Other builds on this
+    // machine are one click away, for a profile that can be pointed at one.
+    if (inst.state === 'error' && state.config.profiles[inst.id] && !state.config.profiles[inst.id].catalog) {
+      const used = String(inst.engine || '').replace(/\\/g, '/').toLowerCase();
+      const others = state.engines.filter((e) => e.path.toLowerCase() !== used);
+      if (others.length) {
+        const row = el('div', 'loaded-retry');
+        row.append(el('span', null, 'Try with'));
+        for (const engine of others) {
+          const button = el('button', 'btn tiny', engine.name);
+          button.type = 'button';
+          button.title = engine.path;
+          button.onclick = guard(() => retryWithEngine(inst.id, engine.path));
+          row.append(button);
+        }
+        card.append(row);
+      }
+    }
     list.append(card);
     renderLoadedFacts(inst);
   }
+}
+
+/** Point a profile at another llama.cpp build and load it again. */
+async function retryWithEngine(id, path) {
+  await api('profile', { profileId: id, patch: { serverExe: path } });
+  state.config.profiles[id].serverExe = path;
+  if (state.editing === id) await selectProfile(id);
+  await api('server/restart', { profileId: id });
 }
 
 /** The small print under a card: port, memory, window, speed. Refreshed as numbers arrive. */
@@ -2926,6 +2960,19 @@ const usesKvarn = (p) => /^kvarn/i.test(String(p.cacheK || '')) || /^kvarn/i.tes
 const FIELDS = [
   { section: 'model', title: 'Model', open: true },
   { key: 'label', label: 'Name', type: 'text' },
+  {
+    key: 'serverExe',
+    label: 'Engine',
+    type: 'select',
+    options: (p) => {
+      const list = state.engines.map((e) => ({ value: e.path, label: e.name }));
+      // A build named by the profile that is no longer on disk stays choosable, so the field never lies.
+      if (p?.serverExe && !list.some((e) => e.value === p.serverExe)) list.push({ value: p.serverExe, label: `${p.serverExe} (not found)` });
+      const def = state.engines.find((e) => e.path === state.engineDefault);
+      return [{ value: '', label: `default — ${def?.name || 'llama.cpp'}` }, ...list.filter((e) => e.value !== state.engineDefault)];
+    },
+    hint: 'Which llama.cpp build runs this model. Some formats only load on a fork built for them.',
+  },
   {
     key: 'ctx',
     label: 'Context length',
@@ -3172,7 +3219,7 @@ function renderFields(container, fields, values, onChange, caps = {}) {
       const norm = (o) => (typeof o === 'string' ? { value: o, label: o === '' ? 'off' : o } : o);
       // Options may be a function when the list is only known at render time --
       // the GPUs llama.cpp reports, for one.
-      const options = typeof field.options === 'function' ? field.options() : field.options;
+      const options = typeof field.options === 'function' ? field.options(values) : field.options;
       for (const raw of options) {
         const opt = norm(raw);
         const option = el('option', null, opt.label);
@@ -3240,6 +3287,14 @@ function renderProfileSelect() {
   renderLoadArea();
 }
 
+async function refreshEngines() {
+  try {
+    const res = await api('engines');
+    state.engines = res.engines;
+    state.engineDefault = res.default?.replace(/\\/g, '/');
+  } catch { /* the Engine field still shows its current value */ }
+}
+
 /** Bring a catalog profile into the profile list. */
 async function importCatalogProfile(id) {
   const res = await api('catalog/import', { profileId: id });
@@ -3301,6 +3356,7 @@ async function selectProfile(id) {
   renderModelLine(id);
   // The forecast first: some fields are built from what it reports -- the GPU
   // list, for one -- so rendering them before it arrives offers a stale choice.
+  await refreshEngines();
   const estimate = await api(`estimate?profile=${encodeURIComponent(id)}`);
   renderEstimate(estimate);
   const caps = capsFor(estimate);
@@ -7273,7 +7329,7 @@ function renderSettingsPane() {
       check.disabled = update.checking || update.info?.enabled === false;
       check.onclick = guard(() => refreshUpdate({ force: true }));
       wrap.append(check);
-      if (updateAvailable()) {
+      if (updateAvailable() && update.info?.installable !== false) {
         const now = el('button', 'btn tiny primary', 'Update now');
         now.type = 'button';
         now.onclick = openUpdateDialog;
@@ -7773,6 +7829,10 @@ function updateAvailable() {
   return Boolean(update.info?.enabled && update.info.available);
 }
 
+function updateInstallable() {
+  return updateAvailable() && update.info?.installable !== false;
+}
+
 function renderVersionChip() {
   const chip = $('versionChip');
   const info = update.info;
@@ -7804,12 +7864,13 @@ function updateSummary() {
     return `Up to date${at ? ` — checked ${at}` : ''}.`;
   }
   const version = info.latest?.version ? `v${info.latest.version}` : shortSha(info.latest?.sha);
-  return `${version} is available${info.behind ? ` — ${num(info.behind)} change${info.behind === 1 ? '' : 's'} since this version` : ''}.`;
+  const unavailable = info.installable === false ? ' — automatic install is disabled in the development checkout' : '';
+  return `${version} is available${info.behind ? ` — ${num(info.behind)} change${info.behind === 1 ? '' : 's'} since this version` : ''}${unavailable}.`;
 }
 
 function openUpdateDialog() {
   const info = update.info;
-  if (!updateAvailable()) return;
+  if (!updateInstallable()) return;
   const version = info.latest?.version ? `v${info.latest.version}` : null;
   $('updateTitle').textContent = 'New update available';
   $('updateSub').textContent = version
@@ -7878,7 +7939,7 @@ async function installUpdate() {
 
 function wireUpdates() {
   $('versionChip').onclick = () => {
-    if (updateAvailable()) openUpdateDialog();
+    if (updateInstallable()) openUpdateDialog();
     else openSettings('updates');
   };
   $('updateGo').onclick = installUpdate;

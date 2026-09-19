@@ -436,6 +436,56 @@ export async function fitWithLlamaCpp(cfg, profile, modelFile, opts = {}) {
  * the user has loaded models, each on its own port; `id` is the profile it was
  * launched from, which is what the rest of the app calls it.
  */
+// llama-server exits on a crash with the OS's own code: an access violation is
+// 0xC0000005 on Windows, SIGSEGV (139) elsewhere.
+const CRASH_CODES = new Set([3221225477, -1073741819, 139]);
+
+const stripStamp = (line) => String(line).replace(/^\s*[\d.]+\s+[A-Z]\s+/, '').trim();
+
+/**
+ * What went wrong, in words, from the lines a llama-server printed before it
+ * died. Its own last line is nearly always "exiting due to model loading
+ * error", which says nothing; the useful one is several lines above it.
+ * Returns null when nothing recognisable is there, and the caller keeps
+ * whatever raw line it had.
+ *
+ * `build` is only used for the name: which llama.cpp the file was refused by is
+ * the whole point of the sentence.
+ */
+export function explainFailure({ lines = [], exe = '', code = null, signal = null } = {}) {
+  const build = String(exe).replace(/\\/g, '/').split('/').slice(-2, -1)[0] || 'this llama.cpp build';
+  const text = lines.map(stripStamp);
+  const find = (re) => { for (const l of text) { const m = re.exec(l); if (m) return m; } return null; };
+
+  const type = find(/tensor '([^']+)' has invalid ggml type (\d+)/);
+  if (type) {
+    return `This model stores its weights in a format (ggml type ${type[2]}) that ${build} does not know. It needs a llama.cpp build (usually a fork) made for that format; the model's page says which. Pick it in the profile's Engine setting.`;
+  }
+  const arch = find(/unknown model architecture: '?([^'\s]+)'?/i);
+  if (arch) {
+    return `${build} does not know the "${arch[1]}" architecture, so it cannot load this model. A newer llama.cpp build may.`;
+  }
+  if (find(/out of (device )?memory|OutOfDeviceMemory|failed to allocate .*buffer|unable to allocate/i)) {
+    return 'The model did not fit in memory. Lower the context length or the GPU layers, or unload another model first.';
+  }
+  const missing = find(/failed to open GGUF file|No such file or directory|cannot open .*gguf/i);
+  if (missing) return 'The model file could not be opened. It may have been moved or deleted.';
+  const mmproj = find(/(mmproj|clip).*(failed|error|unable)|(failed|error|unable).*(mmproj|clip)/i);
+  if (mmproj) return `The vision tower failed to load (${mmproj[0].slice(0, 120)}). Turn Vision off in the profile, or use the tower that matches this model.`;
+
+  // No error text at all, and a crash code: the build fell over while reading the file.
+  if (CRASH_CODES.has(Number(code)) || signal === 'SIGSEGV') {
+    return `${build} crashed while loading this model (exit code ${code ?? signal}), without saying why. Usually the build and the file do not match: the build is too old or too new for this format, or was compiled without its kernels.`;
+  }
+  // The last error that says something more than "I gave up".
+  const generic = /exiting due to model loading error|failed to load model|error loading model/i;
+  const specific = [...text].reverse().find((l, i) => {
+    const raw = lines[lines.length - 1 - i];
+    return /^\s*[\d.]+\s+E\s/.test(raw) && !generic.test(l);
+  });
+  return specific ? specific.slice(0, 220) : null;
+}
+
 export class LlamaServer extends EventEmitter {
   constructor(id = null) {
     super();
@@ -589,6 +639,11 @@ export class LlamaServer extends EventEmitter {
       this.startedAt = null;
       const clean = code === 0 || signal === 'SIGTERM';
       this._log('harness', `llama-server exited (code=${code} signal=${signal})`);
+      if (!clean) {
+        // Say why, not just that: the raw last line is "exiting due to model loading error".
+        const why = explainFailure({ lines: this.logs.map((l) => l.line), exe: serverExe, code, signal });
+        if (why) this.lastError = why;
+      }
       this._setState(clean ? 'stopped' : 'error');
     });
     this.proc.on('error', (err) => {

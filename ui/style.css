@@ -4052,3 +4052,6 @@ label .help:hover { color: var(--text); border-color: var(--text-faint); }
 .update-error { margin: 0 0 14px; color: var(--bad); font-size: 13px; text-align: left; white-space: pre-wrap; }
 
 .action-control { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+.loaded-retry { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid var(--line-soft); color: var(--text-faint); font-size: 12px; }
+.loaded-card:has(.loaded-retry) { flex-wrap: wrap; }

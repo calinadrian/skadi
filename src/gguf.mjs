@@ -224,6 +224,17 @@ const CTX_LADDER = [4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 16384
  * Build a launch profile for an arbitrary .gguf from its own metadata plus the
  * VRAM actually available, choosing the largest sensible context that fits.
  */
+/**
+ * What to call a model. The name inside the file is preferred, but converters
+ * leave junk there ("Hf") often enough that a name too short to mean anything
+ * loses to the file's own.
+ */
+function displayName(shape, fileName, alias) {
+  const inside = String(shape.name || '').trim();
+  if (inside.length >= 4 && !/^(hf|model|unknown|llama)$/i.test(inside)) return inside;
+  return String(fileName || '').replace(/\.gguf$/i, '') || alias;
+}
+
 export function suggestProfile(shape, budgetBytes, { name, modelPath: file, threads = 8 } = {}) {
   const alias = String(name || shape.name || 'model')
     .toLowerCase()
@@ -255,7 +266,7 @@ export function suggestProfile(shape, budgetBytes, { name, modelPath: file, thre
 
   return {
     ...base,
-    label: `${shape.name || alias} — ${(ctx / 1024).toFixed(0)}K`,
+    label: `${displayName(shape, name, alias)} — ${(ctx / 1024).toFixed(0)}K`,
     modelPath: file,
     model: file ? file.split(/[\\/]/).pop() : undefined,
     alias,
