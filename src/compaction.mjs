@@ -39,6 +39,9 @@ export const DEFAULTS = {
   // single huge `grep` cannot itself overflow the summariser (opencode caps at
   // 2000 chars for the same reason).
   toolOutputChars: 2000,
+  // Fraction of the window the verbatim tail may occupy; beyond it the oldest
+  // tail messages are summarised too, and oversized tool results are clipped.
+  tailFraction: 0.3,
 };
 
 // Characters per token for the local estimate. Code- and JSON-heavy agent
@@ -115,7 +118,7 @@ export function isContextOverflow(err) {
  * boundary is near, cut at the ideal point instead and only step back over
  * `tool` messages, so a tool result never loses the call that produced it.
  */
-export function splitForCompaction(messages, keepMessages, { maxLookback = keepMessages } = {}) {
+export function splitForCompaction(messages, keepMessages, { maxLookback = keepMessages, tailTokens = 0 } = {}) {
   const system = [];
   // Copy: shifting the system prompt off must never mutate the caller's array.
   const rest = [...(messages || [])];
@@ -124,19 +127,48 @@ export function splitForCompaction(messages, keepMessages, { maxLookback = keepM
   if (!rest.length) return { system, head: [], tail: [] };
 
   const ideal = Math.max(rest.length - keepMessages, 0);
-  if (ideal === 0) return { system, head: [], tail: rest };
-
   let start = ideal;
-  const floor = Math.max(ideal - maxLookback, 0);
-  while (start > floor && rest[start].role !== 'user') start--;
-  if (rest[start].role !== 'user') {
-    start = ideal;
-    // Never cut between an assistant's tool_calls and their results: stepping
-    // back over `tool` messages lands on the assistant that issued them, and
-    // the whole block stays together in the tail.
-    while (start > 0 && rest[start].role === 'tool') start--;
+  if (ideal > 0) {
+    const floor = Math.max(ideal - maxLookback, 0);
+    while (start > floor && rest[start].role !== 'user') start--;
+    if (rest[start].role !== 'user') {
+      start = ideal;
+      // Never cut between an assistant's tool_calls and their results: stepping
+      // back over `tool` messages lands on the assistant that issued them, and
+      // the whole block stays together in the tail.
+      while (start > 0 && rest[start].role === 'tool') start--;
+    }
+  }
+  // The tail is kept verbatim, so it must be bounded in tokens as well as in
+  // message count: twelve messages of file reads can alone exceed the window,
+  // and compacting the head then changes nothing. Hand the oldest of them to
+  // the head instead, still cutting only on a non-tool boundary.
+  if (tailTokens > 0) {
+    while (start < rest.length - 1 && estimateTokens(rest.slice(start)) > tailTokens) {
+      start++;
+      while (start < rest.length - 1 && rest[start].role === 'tool') start++;
+    }
+    if (rest[start]?.role === 'tool') {
+      while (start > 0 && rest[start].role === 'tool') start--;
+    }
   }
   return { system, head: rest.slice(0, start), tail: rest.slice(start) };
+}
+
+/**
+ * Last resort for a tail that is still over budget because of a few enormous
+ * tool results: clip those in place of dropping the messages around them.
+ */
+export function clipTailToolOutputs(tail, tailTokens, maxChars = 8000) {
+  if (!tailTokens || estimateTokens(tail) <= tailTokens) return tail;
+  return tail.map((m) => {
+    if (m.role !== 'tool' || typeof m.content !== 'string' || m.content.length <= maxChars) return m;
+    const half = Math.floor(maxChars / 2);
+    return {
+      ...m,
+      content: `${m.content.slice(0, half)}\n… [${m.content.length - maxChars} chars elided by compaction] …\n${m.content.slice(-half)}`,
+    };
+  });
 }
 
 /** Shrink one message for the summary request; returns { message, truncated }. */

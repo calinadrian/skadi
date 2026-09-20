@@ -105,6 +105,7 @@ test('a new chat inherits the browser of the draft the window names', async () =
     const self = {
       sessions: store,
       turns: new Map(),
+      subagents: new Map(),
       settings: {},
       config: { profiles: {}, activeProfile: 'p' },
       skills: { list: async () => [] },
@@ -119,6 +120,9 @@ test('a new chat inherits the browser of the draft the window names', async () =
       chat: Skadi.prototype.chat,
       userContent: Skadi.prototype.userContent,
       appendUserMessage: Skadi.prototype.appendUserMessage,
+      workingSessionIds: Skadi.prototype.workingSessionIds,
+      liveSession: Skadi.prototype.liveSession,
+      broadcastTurns: Skadi.prototype.broadcastTurns,
       refineTitle() {},
     };
 
@@ -141,6 +145,7 @@ test('a chat that already exists takes no browser from any draft', async () => {
     const self = {
       sessions: store,
       turns: new Map(),
+      subagents: new Map(),
       settings: {},
       config: { profiles: {}, activeProfile: 'p' },
       skills: { list: async () => [] },
@@ -155,6 +160,9 @@ test('a chat that already exists takes no browser from any draft', async () => {
       chat: Skadi.prototype.chat,
       userContent: Skadi.prototype.userContent,
       appendUserMessage: Skadi.prototype.appendUserMessage,
+      workingSessionIds: Skadi.prototype.workingSessionIds,
+      liveSession: Skadi.prototype.liveSession,
+      broadcastTurns: Skadi.prototype.broadcastTurns,
     };
 
     await self.chat(existing.id, 'hello again', [], { draftKey: 'draft-mine' });

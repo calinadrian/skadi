@@ -385,6 +385,32 @@ while the summary streams. Tune it in
 }
 ```
 
+## Subagents and loop recovery
+
+Before a parent turn begins, a small no-reasoning router decides whether a
+bounded read-only search, repository inspection, factual lookup or summary can
+be delegated. When it can, a focused child receives only that task and the
+read-only tools, then returns a compact evidence report to the parent. The
+parent still owns every edit and final runtime check. **Automatic research
+subagents** and their default reasoning level are configurable under
+**Settings → Agent**; the `delegate_task` tool also accepts an explicit effort
+from `none` through `xhigh`. A child is registered as running before it begins,
+so reconnect and Stop can reach it even while the parent is waiting. If the
+semantic supervisor detects that a read-only child has stopped making useful
+progress, the child returns its evidence and recommended next action to the
+parent instead of starting another research round.
+
+Loop recovery is semantic rather than based on elapsed time or a magic call
+count. After a tool step, a lightweight supervisor compares the new evidence
+with the current user request and recent evidence. If the step repeated known
+work, retried without adapting, or wandered off the direct path, the supervisor
+returns one concrete redirect. Read-only loop steps are archived for the saved
+chat but removed from the model's active context; steps that may have side
+effects remain in context so the model never forgets a possible mutation.
+Malformed or unavailable supervisor output fails open and the parent continues
+normally. **Emergency tool ceiling** remains available as an optional fallback,
+but `0` disables it and relies on semantic recovery.
+
 ## Settings
 
 The gear button in the top bar opens settings: sections on the
@@ -444,6 +470,13 @@ line counts only.
 `read_file`, `write_file`, `edit_file`, `delete_file`, `list_dir`, `glob`,
 `grep`, `run_command`, `web_search`, the `browser_*` set, plus `load_skill` / `save_skill` and
 `remember` / `recall` / `forget`.
+
+Repository inspection is search-first. `grep` uses native ripgrep when it is
+available and falls back to Skadi's own streaming scanner, including for files
+larger than the 256 KB whole-file read guard. Results carry `path:line`, which
+the agent feeds into `read_file` as an explicit numbered range. Large source
+files therefore stay inspectable without dumping them into model context;
+returned excerpts remain capped at 30,000 characters.
 
 `web_search` uses DuckDuckGo by default, with no API key or account. In
 **Settings → Agent**, it can instead use the JSON API of a self-hosted SearXNG

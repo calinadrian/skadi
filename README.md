@@ -99,8 +99,9 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
   downloading, and get resumable downloads.
 
 **An agent that can actually work**
-- **File and shell tools** confined to the project folder you choose: read, write,
-  edit, glob, grep, run commands.
+- **File and shell tools** confined to the project folder you choose: range-safe
+  large-file reads, ripgrep-first search with a portable fallback, writes, edits,
+  globs and commands.
 - **Free web search** through DuckDuckGo out of the box, or your own SearXNG
   instance — no paid search API key required. If Docker is available, Skadi can
   also start and stop a private SearXNG container alongside the app. The globe
@@ -111,6 +112,8 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
   can screenshot, click, type and read the console to check its own work.
 - **Skills and memory** the agent can read and write, kept as plain Markdown.
 - **Context compaction** so long sessions don't die at the window's edge.
+- **Automatic read-only subagents** for bounded search, inspection and summary work, with a configurable reasoning level that defaults to none; children are visible to reconnect/Stop and hand control back when semantic supervision finds no progress.
+- **Semantic loop recovery** that judges progress against the request, removes detected bad read-only cycles from active context, and redirects the agent without a fixed call-count cutoff.
 - **Photos, files and folders** as attachments, for vision models.
 
 **Bring any model**

@@ -21,10 +21,18 @@ export const DEFAULT_SETTINGS = {
   updateCheck: true,
   // Poll interval for the GPU memory sampler, milliseconds.
   vramPollMs: 2000,
-  // Hard ceiling on agent tool-call rounds per user turn, so a confused model
-  // cannot loop forever burning tokens at 9 t/s. 0 removes the ceiling: the
-  // turn then ends only when the model stops calling tools (or you stop it).
-  maxToolRounds: 24,
+  // Optional emergency ceiling. Normal loop control is semantic: a lightweight
+  // supervisor judges whether the latest action made progress and prunes bad
+  // cycles from active context. 0 disables this count-based fallback.
+  maxToolRounds: 0,
+  loopDetection: true,
+  // The supervisor is a classification task, so thinking is off by default.
+  loopReviewEffort: 'low',
+  // Route bounded research/search/summary work through a read-only child
+  // before the parent turn. Both routing and the default child run without
+  // reasoning unless the user raises this setting or the tool argument.
+  autoSubagents: true,
+  autoSubagentReasoning: 'none',
   // Seconds before a single shell command is killed.
   commandTimeoutSec: 120,
   // Free, keyless agent web search. DuckDuckGo needs no setup; SearXNG points

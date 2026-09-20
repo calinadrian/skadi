@@ -111,6 +111,7 @@ const state = {
   ctxLimit: null, // window they are measured against
   attachments: [],
   webSearch: true,
+  subagents: true,
   browserStream: null,
   tasks: [],
   undo: [], // this session's file-edit undo entries {callId, path, added, removed, at}
@@ -1144,6 +1145,7 @@ const viewer = { tabs: [], active: null, project: null };
 /** Open a file, in full. `card` is the tool call it came from, when it came from one. */
 async function openFileViewer(path, card = null) {
   if (!path) return;
+  selectWorkspaceTool?.('files');
   // Tabs belong to a project: another project's files are not what was open.
   if (viewer.project !== state.activeProject) {
     viewer.tabs = [];
@@ -1157,6 +1159,8 @@ async function openFileViewer(path, card = null) {
   if (card) tab.card = card;
   tab.mode = 'file';
   activateViewerTab(tab);
+  $('fileHost').hidden = false;
+  $('fileViewerGutter').hidden = false;
   $('fileVeil').hidden = false;
   await loadViewerFile(tab);
 }
@@ -1282,6 +1286,8 @@ function syncFileModalButtons() {
 
 function closeFileModal() {
   $('fileVeil').hidden = true;
+  $('fileHost').hidden = true;
+  $('fileViewerGutter').hidden = true;
   fileModalCallId = null;
   fileModalPath = null;
 }
@@ -1499,6 +1505,14 @@ function renderTasks() {
   const running = state.tasks.filter((t) => t.status === 'running');
   const done = state.tasks.filter((t) => t.status !== 'running');
   $('taskCount').textContent = running.length || '';
+  const tabCount = $('taskTabCount');
+  if (tabCount) {
+    tabCount.hidden = running.length === 0;
+    tabCount.textContent = String(running.length);
+    tabCount.closest('[data-tool]')?.setAttribute('aria-label', running.length
+      ? `Tasks, ${running.length} running`
+      : 'Tasks');
+  }
   if (!state.tasks.length) {
     box.append(el('p', 'hint', 'No background tasks. Long builds started with background:true stream here.'));
     return;
@@ -1532,7 +1546,7 @@ function renderTaskPill() {
 
 function wireTasks() {
   $('taskPill').onclick = () => {
-    setInspectorOpen(true);
+    selectWorkspaceTool?.('tasks');
     const panel = $('tasksPanel');
     panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     panel.classList.remove('flash');
@@ -1716,7 +1730,7 @@ function toggleAllChanges() {
 }
 
 function wireOverlays() {
-  $('btnChanges').onclick = () => openChanges();
+  $('btnChanges').onclick = () => selectWorkspaceTool?.('review');
   $('changesClose').onclick = closeChanges;
   $('changesRefresh').onclick = () => loadChanges();
   $('changesToggleAll').onclick = toggleAllChanges;
@@ -3103,7 +3117,11 @@ const FIELDS = [
 ];
 
 const SKADI_FIELDS = [
-  { key: 'maxToolRounds', label: 'Max tool rounds', type: 'range', min: 0, max: 60, step: 1, fmt: (v) => (Number(v) === 0 ? 'unlimited' : String(v)) },
+  { key: 'loopDetection', label: 'Semantic loop detection', type: 'bool' },
+  { key: 'loopReviewEffort', label: 'Loop supervisor reasoning', type: 'select', options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
+  { key: 'autoSubagents', label: 'Automatic research subagents', type: 'bool' },
+  { key: 'autoSubagentReasoning', label: 'Subagent reasoning', type: 'select', options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
+  { key: 'maxToolRounds', label: 'Emergency tool ceiling', type: 'range', min: 0, max: 60, step: 1, fmt: (v) => (Number(v) === 0 ? 'off' : String(v)) },
   { key: 'commandTimeoutSec', label: 'Command timeout (s)', type: 'number' },
   { key: 'approveWrites', label: 'Confirm file writes', type: 'bool' },
   { key: 'approveCommands', label: 'Confirm shell commands', type: 'bool' },
@@ -3444,7 +3462,9 @@ function followChatChoice(session) {
   state.chatProvider = known ? session.provider : null;
   state.chatModel = known ? session.model || null : null;
   state.webSearch = session ? session.webSearch !== false : true;
+  state.subagents = session ? session.subagents !== false : state.settings?.autoSubagents !== false;
   renderWebSearchToggle();
+  renderSubagentsToggle();
   closeModelMenu();
   applyProviderVisibility();
   renderEffort();
@@ -3459,6 +3479,17 @@ function renderWebSearchToggle() {
   button.setAttribute('aria-pressed', String(enabled));
   button.setAttribute('aria-label', `${enabled ? 'Disable' : 'Enable'} web search for this chat`);
   button.title = `Web search ${enabled ? 'enabled' : 'disabled'} for this chat`;
+  button.disabled = isBusy();
+}
+
+function renderSubagentsToggle() {
+  const button = $('btnSubagents');
+  if (!button) return;
+  const enabled = state.subagents !== false;
+  button.classList.toggle('active', enabled);
+  button.setAttribute('aria-pressed', String(enabled));
+  button.setAttribute('aria-label', `${enabled ? 'Disable' : 'Enable'} subagents for this chat`);
+  button.title = `Subagents ${enabled ? 'enabled' : 'disabled'} for this chat`;
   button.disabled = isBusy();
 }
 
@@ -4258,6 +4289,7 @@ function setBusy(busy) {
   // unpressable instead of answering with a red error.
   $('btnCompact').disabled = busy;
   $('btnWebSearch').disabled = busy;
+  $('btnSubagents').disabled = busy;
   // The composer's send button flips into the stop control: same button,
   // different role — red square while a turn runs, accent arrow when idle.
   const send = $('btnSend');
@@ -4672,6 +4704,25 @@ function connect() {
     liveEvent('tool_result', d);
   });
 
+  es.addEventListener('agent_subagent', (e) => {
+    const d = JSON.parse(e.data);
+    if (!isPendingView(d.sessionId)) return;
+    if (d.state === 'running') setActivity(`Research subagent (${d.reasoning || 'none'} reasoning)…`);
+    else if (d.state === 'done') setActivity('Subagent report received — parent agent is continuing…');
+    else setActivity(`Subagent unavailable — parent agent is continuing${d.error ? `: ${d.error}` : '…'}`);
+  });
+
+  es.addEventListener('agent_loop_detected', (e) => {
+    const d = JSON.parse(e.data);
+    if (!isPendingView(d.sessionId)) return;
+    setActivity(`Loop corrected — ${d.next || 'redirecting to the shortest path…'}`);
+  });
+
+  es.addEventListener('agent_loop_review_error', (e) => {
+    const d = JSON.parse(e.data);
+    if (isPendingView(d.sessionId)) setActivity('Progress review unavailable — continuing normally…');
+  });
+
   es.addEventListener('agent_approval_request', (e) => {
     const d = JSON.parse(e.data);
     // Held per chat: a turn waiting in a background chat must not replace the
@@ -4894,8 +4945,32 @@ $('btnFit').onclick = guard(async () => {
 $('btnSend').onclick = (e) => {
   if (!isBusy()) return;
   e.preventDefault();
-  guard(() => api('abort', { sessionId: state.sessionId }))();
+  stopTurn();
 };
+let stopping = false;
+async function stopTurn() {
+  // One request per press: mashing the button used to stack a red error per click.
+  if (stopping) return;
+  stopping = true;
+  const id = state.sessionId;
+  try {
+    await api('abort', { sessionId: id });
+  } catch (err) {
+    // A network failure (fetch throws TypeError) means the server is not
+    // answering, so no turn of ours is running there. Say so once and let the
+    // composer go idle instead of leaving a stop button that cannot stop.
+    if (err instanceof TypeError) {
+      state.running.delete(id);
+      syncBusy();
+      markOffline();
+      addMessage('error', 'Lost the server, so nothing is running. Stopped.');
+    } else {
+      addMessage('error', err.message);
+    }
+  } finally {
+    stopping = false;
+  }
+}
 $('btnSettings').onclick = () => openSettings('model');
 $('settingsClose').onclick = closeSettings;
 $('btnBenchmarks').onclick = () => openBenchmarks();
@@ -5046,9 +5121,9 @@ function wireRailResize() {
 // handle, so dragging towards it shrinks the panel.
 // ============================================================================
 
-const INSPECTOR_MIN = 260;
-const INSPECTOR_MAX = 560;
-const INSPECTOR_DEFAULT = 334;
+const INSPECTOR_MIN = 280;
+const INSPECTOR_MAX = 760;
+const INSPECTOR_DEFAULT = 380;
 const INSPECTOR_W_KEY = 'skadi.rightW';
 const INSPECTOR_OPEN_KEY = 'skadi.inspectorOpen';
 
@@ -5116,6 +5191,7 @@ function wireInspector() {
 
   gutter.addEventListener('pointermove', (e) => {
     if (!dragging) return;
+    // The dock sits on the right, so dragging its leading edge left grows it.
     setInspectorWidth(startW - (e.clientX - startX));
   });
 
@@ -5285,9 +5361,18 @@ let selectWorkspaceTool = null;
 function wireToolDock() {
   const tabs = [...document.querySelectorAll('#toolTabs [data-tool]')];
   const panes = [...document.querySelectorAll('[data-tool-pane]')];
+
+  // These used to be body-level overlays. Keeping the same renderers but
+  // mounting them here turns them into persistent mini-panels in the dock.
+  $('reviewHost').append($('changesVeil'));
+  $('fileHost').append($('fileVeil'));
+  for (const dialog of [$('changesVeil').firstElementChild, $('fileVeil').firstElementChild]) {
+    dialog?.setAttribute('aria-modal', 'false');
+    dialog?.setAttribute('role', 'region');
+  }
+
   const selectTool = (name) => {
     setInspectorOpen(true);
-    $('btnLocalAI').classList.toggle('active', name === 'ai');
     for (const tab of tabs) {
       const active = tab.dataset.tool === name;
       tab.classList.toggle('active', active);
@@ -5302,6 +5387,7 @@ function wireToolDock() {
   selectWorkspaceTool = (name) => {
     selectTool(name);
     if (name === 'files') refreshFilesTab();
+    if (name === 'review') openChanges();
   };
   for (const tab of tabs) tab.onclick = () => selectWorkspaceTool(tab.dataset.tool);
   $('filesRefresh').onclick = () => refreshFilesTab({ force: true });
@@ -5309,13 +5395,63 @@ function wireToolDock() {
     clearTimeout(files.timer);
     files.timer = setTimeout(() => runFilesFilter(), 180);
   });
+
   $('btnCloseInspector').onclick = () => setInspectorOpen(false);
-  $('toolOpenChanges').onclick = () => openChanges();
-  $('toolToggleBrowser').onclick = () => {
-    setBrowserOpen(!isBrowserOpen(), { focus: true });
-    $('toolToggleBrowser').textContent = isBrowserOpen() ? 'Close browser' : 'Open browser';
+  wireFileViewerResize();
+}
+
+const FILE_VIEW_MIN_H = 160;
+const FILE_VIEW_H_KEY = 'skadi.fileViewH';
+
+function wireFileViewerResize() {
+  const gutter = $('fileViewerGutter');
+  const host = $('fileHost');
+  if (!gutter || !host) return;
+  const setHeight = (px, save = false) => {
+    const paneH = document.querySelector('.files-pane')?.getBoundingClientRect().height || 700;
+    const max = Math.max(FILE_VIEW_MIN_H, paneH - 180);
+    const height = Math.min(max, Math.max(FILE_VIEW_MIN_H, Math.round(px)));
+    document.documentElement.style.setProperty('--file-view-h', `${height}px`);
+    gutter.setAttribute('aria-valuenow', String(height));
+    if (save) try { localStorage.setItem(FILE_VIEW_H_KEY, String(height)); } catch { /* storage unavailable */ }
+    return height;
   };
-  $('btnLocalAI').onclick = () => selectTool('ai');
+  try {
+    const saved = Number(localStorage.getItem(FILE_VIEW_H_KEY));
+    setHeight(saved >= FILE_VIEW_MIN_H ? saved : 320);
+  } catch { setHeight(320); }
+
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+  gutter.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    startY = e.clientY;
+    startH = host.getBoundingClientRect().height;
+    gutter.classList.add('dragging');
+    document.body.classList.add('resizing-mini-panel');
+    try { gutter.setPointerCapture(e.pointerId); } catch { /* already captured */ }
+    e.preventDefault();
+  });
+  gutter.addEventListener('pointermove', (e) => {
+    if (dragging) setHeight(startH - (e.clientY - startY));
+  });
+  const finish = () => {
+    if (!dragging) return;
+    dragging = false;
+    gutter.classList.remove('dragging');
+    document.body.classList.remove('resizing-mini-panel');
+    setHeight(host.getBoundingClientRect().height, true);
+  };
+  gutter.addEventListener('pointerup', finish);
+  gutter.addEventListener('pointercancel', finish);
+  gutter.addEventListener('dblclick', () => setHeight(320, true));
+  gutter.addEventListener('keydown', (e) => {
+    const step = e.shiftKey ? 32 : 10;
+    if (e.key === 'ArrowUp') { e.preventDefault(); setHeight(host.getBoundingClientRect().height + step, true); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); setHeight(host.getBoundingClientRect().height - step, true); }
+  });
 }
 
 const DOCK_MIN_H = 120;
@@ -5533,6 +5669,22 @@ $('btnWebSearch').onclick = guard(async () => {
   } catch (error) {
     state.webSearch = previous;
     renderWebSearchToggle();
+    throw error;
+  }
+});
+
+$('btnSubagents').onclick = guard(async () => {
+  if (isBusy()) return;
+  const previous = state.subagents;
+  state.subagents = !state.subagents;
+  renderSubagentsToggle();
+  try {
+    if (state.sessionId) {
+      await api('session/subagents', { id: state.sessionId, enabled: state.subagents });
+    }
+  } catch (error) {
+    state.subagents = previous;
+    renderSubagentsToggle();
     throw error;
   }
 });
@@ -6601,6 +6753,7 @@ $('composer').onsubmit = (e) => {
     provider: chatProviderId(),
     model: chatProvider()?.managed ? chatProvider()?.instance || null : chatProvider()?.model || null,
     webSearch: state.webSearch,
+    subagents: state.subagents,
   })
     .then(() => {
       // The server answers 202 before the session file lands; if the
@@ -7618,15 +7771,45 @@ function renderSettingsPane() {
     desc: 'Ask before the agent runs a command.',
   });
   addRow(agent, {
+    key: 'autoSubagents',
+    type: 'toggle',
+    icon: 'chip',
+    label: 'Automatic research subagents',
+    desc: 'Automatically delegate bounded search, inspection, and summary work to a focused read-only child.',
+  });
+  addRow(agent, {
+    key: 'autoSubagentReasoning',
+    type: 'select',
+    icon: 'chip',
+    label: 'Subagent reasoning',
+    desc: 'Default effort for automatically delegated work. None is fastest for routine research.',
+    options: [['none', 'None'], ['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high']],
+  });
+  addRow(agent, {
+    key: 'loopDetection',
+    type: 'toggle',
+    icon: 'restart',
+    label: 'Semantic loop detection',
+    desc: 'A lightweight supervisor detects non-progress, removes the bad step from active context, and redirects the agent.',
+  });
+  addRow(agent, {
+    key: 'loopReviewEffort',
+    type: 'select',
+    icon: 'chip',
+    label: 'Loop supervisor reasoning',
+    desc: 'Reasoning used by the progress supervisor. None is fastest and is usually enough.',
+    options: [['none', 'None'], ['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high']],
+  });
+  addRow(agent, {
     key: 'maxToolRounds',
     type: 'range',
     min: 0,
     max: 60,
     step: 1,
-    fmt: (v) => (Number(v) === 0 ? 'unlimited' : String(v)),
+    fmt: (v) => (Number(v) === 0 ? 'off' : String(v)),
     icon: 'restart',
-    label: 'Max tool rounds',
-    desc: 'Ceiling on tool calls per turn. 0 removes the ceiling.',
+    label: 'Emergency tool ceiling',
+    desc: 'Optional last-resort ceiling. Keep at 0 to rely on semantic loop detection instead.',
   });
   addRow(agent, {
     key: 'commandTimeoutSec',

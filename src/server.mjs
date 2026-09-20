@@ -43,8 +43,10 @@ import { Agent, buildSystemPrompt } from './agent.mjs';
 import { resolveContextTokens, estimateTokens } from './compaction.mjs';
 import {
   loadProviders, saveProviders, saveSecret, providerStatus, resolveProvider, listModels, modelLimits,
-  repairToolArguments,
+  repairToolArguments, streamCompletion,
 } from './providers.mjs';
+import { progressReviewInput, progressReviewPrompt, parseProgressReview } from './progress-review.mjs';
+import { delegationPrompt, parseDelegation } from './delegation.mjs';
 import { loadProjects, activeProject, addProject, removeProject, selectProject, projectSummary } from './projects.mjs';
 import { storeAttachment, attachmentsToBlocks, describeAttachments } from './attachments.mjs';
 import { AgentBrowser, browserTools, SHOTS_DIR, VIEWPORT, profileDirFor } from './browser.mjs';
@@ -313,6 +315,10 @@ export class Skadi {
     // A local llama-server with `-np 1` will still decode them one after the
     // other; the harness no longer adds a restriction of its own on top.
     this.turns = new Map();
+    // Read-only children can run before the parent turn is constructed or
+    // inside an already-running parent. Track them separately so reconnect,
+    // Stop, deletion, and settings changes can still reach them.
+    this.subagents = new Map();
     this.tasks = new TaskManager();
     this.tasks.on('update', (t) => this.broadcast('task_update', { task: t }));
     this.tasks.on('done', (t) => {
@@ -1722,7 +1728,151 @@ export class Skadi {
     return alt;
   }
 
-  async makeAgent(provider, model, { webSearch = true } = {}) {
+  /** Session ids with either a parent turn or one or more research children. */
+  workingSessionIds() {
+    return [...new Set([...this.turns.keys(), ...this.subagents.keys()])];
+  }
+
+  isSessionWorking(id) {
+    return this.turns.has(id) || this.subagents.has(id);
+  }
+
+  liveSession(id) {
+    const parent = this.turns.get(id)?.session;
+    if (parent) return parent;
+    for (const child of this.subagents.get(id) ?? []) {
+      if (child.session) return child.session;
+    }
+    return null;
+  }
+
+  broadcastTurns() {
+    this.broadcast('turns', { sessionIds: this.workingSessionIds() });
+  }
+
+  trackSubagent(sessionId, session, agent) {
+    if (!sessionId) return null;
+    const record = { agent, session, cancelled: false };
+    const records = this.subagents.get(sessionId) ?? new Set();
+    records.add(record);
+    this.subagents.set(sessionId, records);
+    this.broadcastTurns();
+    return record;
+  }
+
+  untrackSubagent(sessionId, record) {
+    if (!sessionId || !record) return;
+    const records = this.subagents.get(sessionId);
+    records?.delete(record);
+    if (!records?.size) this.subagents.delete(sessionId);
+    this.broadcastTurns();
+  }
+
+  /** Abort parent and child work for one chat. Returns agents signalled. */
+  abortSessionWork(sessionId) {
+    let stopped = 0;
+    const parent = this.turns.get(sessionId);
+    if (parent) {
+      parent.agent.abort();
+      stopped++;
+    }
+    for (const child of this.subagents.get(sessionId) ?? []) {
+      child.cancelled = true;
+      child.agent.abort();
+      stopped++;
+    }
+    return stopped;
+  }
+
+  progressReviewer(provider, model) {
+    return async ({ messages, roundStart, signal, ledger }) => {
+      const input = progressReviewInput(messages, roundStart, ledger);
+      const effort = String(this.settings.loopReviewEffort || 'low').toLowerCase();
+      const sampling = { max_tokens: 220, temperature: 0 };
+      if (provider.managed) {
+        sampling.chat_template_kwargs = { enable_thinking: effort !== 'none', reasoning_effort: effort };
+      } else if (effort && effort !== 'none') {
+        sampling.reasoning_effort = effort;
+      }
+      const result = await streamCompletion(provider, {
+        model,
+        messages: [{ role: 'user', content: progressReviewPrompt(input) }],
+        tools: [],
+        sampling,
+      }, {}, signal);
+      return parseProgressReview(result.message?.content);
+    };
+  }
+
+  async planDelegation(provider, model, request) {
+    if (!String(request || '').trim()) return null;
+    const result = await streamCompletion(provider, {
+      model,
+      messages: [{ role: 'user', content: delegationPrompt(request) }],
+      tools: [],
+      sampling: {
+        max_tokens: 220,
+        temperature: 0,
+        ...(provider.managed ? { chat_template_kwargs: { enable_thinking: false, reasoning_effort: 'none' } } : {}),
+      },
+    });
+    const plan = parseDelegation(result.message?.content);
+    if (plan?.delegate && this.settings.autoSubagentReasoning) {
+      plan.reasoning = String(this.settings.autoSubagentReasoning);
+    }
+    return plan;
+  }
+
+  async runSubagent(provider, model, {
+    task, reasoning = 'none', webSearch = true, sessionId = null, session = null,
+  } = {}) {
+    const request = String(task || '').trim();
+    if (!request) throw new Error('delegate_task requires a task');
+    const ctx = { workspace: this.workspace, settings: this.settings, tasks: this.tasks };
+    const researchTools = Object.fromEntries(Object.entries({
+      ...buildTools(ctx),
+      ...(webSearch ? buildWebSearchTools(ctx) : {}),
+      ...skillTools(this.skills),
+    }).filter(([, tool]) => !tool.mutates));
+    const child = new Agent({
+      provider,
+      model,
+      tools: researchTools,
+      schemas: toolSchemas(researchTools),
+      settings: this.settings,
+      approve: async () => false,
+      contextTokens: await this.contextTokensFor(provider),
+      summaryModel: this.resolveCompressionModel(provider, model),
+      reviewProgress: this.progressReviewer(provider, model),
+      stopOnLoop: true,
+    });
+    const project = activeProject();
+    const messages = [{
+      role: 'system',
+      content: `You are a focused read-only subagent. Complete only the delegated task. Gather decisive evidence with the fewest tool calls, do not edit files, and return a concise report with exact paths, lines, commands, or sources. Do not delegate further.\n\nProject: ${projectSummary(project)}`,
+    }, { role: 'user', content: request }];
+    const effort = String(reasoning || 'none').toLowerCase();
+    const sampling = provider.managed
+      ? { chat_template_kwargs: { enable_thinking: effort !== 'none', reasoning_effort: effort } }
+      : (effort === 'none' ? {} : { reasoning_effort: effort });
+    const tracked = this.trackSubagent(sessionId, session, child);
+    try {
+      await child.run(messages, { sampling });
+      const answer = [...messages].reverse().find((m) => m.role === 'assistant' && m.content && !m.tool_calls)?.content;
+      return String(answer || 'Subagent finished without a written report.');
+    } catch (err) {
+      if (tracked?.cancelled) {
+        const stopped = new Error('Research subagent stopped.');
+        stopped.code = 'SUBAGENT_ABORTED';
+        throw stopped;
+      }
+      throw err;
+    } finally {
+      this.untrackSubagent(sessionId, tracked);
+    }
+  }
+
+  async makeAgent(provider, model, { webSearch = true, subagents = true } = {}) {
     const ctx = {
       workspace: this.workspace,
       settings: this.settings,
@@ -1740,6 +1890,26 @@ export class Skadi {
       ...(webSearch ? buildWebSearchTools(ctx) : {}),
       ...skillTools(this.skills),
       ...memoryTools(this.memory),
+      ...(subagents ? { delegate_task: {
+        schema: {
+          description: 'Delegate one bounded read-only research, search, inspection, or summary task to a focused subagent. Use this before broad exploration. The subagent returns evidence only; the parent remains responsible for edits and final verification.',
+          parameters: {
+            type: 'object',
+            properties: {
+              task: { type: 'string', description: 'Self-contained objective and expected evidence.' },
+              reasoning: { type: 'string', enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'], description: 'Reasoning effort. Use none for find/search/summary; raise only for genuinely difficult analysis.' },
+            },
+            required: ['task'],
+          },
+        },
+        run: ({ task, reasoning }) => this.runSubagent(provider, model, {
+          task,
+          reasoning,
+          webSearch,
+          sessionId: ctx.sessionId,
+          session: this.turns.get(ctx.sessionId)?.session ?? null,
+        }),
+      } } : {}),
       ...browserTools(() => this.getBrowser(ctx.sessionId), {
         vision: () => provider.vision !== false,
         onScreenshot: (shot) => {
@@ -1768,13 +1938,14 @@ export class Skadi {
       // hosted APIs. Null disables the automatic preflight, not manual use.
       contextTokens: await this.contextTokensFor(provider),
       summaryModel: this.resolveCompressionModel(provider, model),
+      reviewProgress: this.progressReviewer(provider, model),
     });
 
     // Every event carries the session it belongs to: with several turns in
     // flight the UI has to know which chat a token belongs to before it can
     // render it. Token and reasoning deltas arrive as bare strings, so they
     // are wrapped rather than spread.
-    for (const event of ['round', 'token', 'reasoning', 'tool_call', 'tool_result', 'approval_request', 'retry', 'steer', 'stats', 'done', 'compact_start', 'compact_progress', 'compact_end']) {
+    for (const event of ['round', 'token', 'reasoning', 'tool_call', 'tool_result', 'approval_request', 'retry', 'steer', 'stats', 'done', 'loop_detected', 'loop_review_error', 'compact_start', 'compact_progress', 'compact_end']) {
       agent.on(event, (data) => {
         const sessionId = agent.toolCtx?.sessionId ?? null;
         const payload = typeof data === 'string' ? { text: data } : { ...(data ?? {}) };
@@ -1849,7 +2020,7 @@ export class Skadi {
     // chat used last, then the default.
     const stored = opts.provider || !sessionId
       ? null
-      : this.turns.get(sessionId)?.session ?? await this.sessions.get(sessionId).catch(() => null);
+      : this.liveSession(sessionId) ?? await this.sessions.get(sessionId).catch(() => null);
     const provider = this.providerFor(opts.provider
       ? { provider: opts.provider, model: opts.model }
       : { provider: stored?.provider, model: stored?.model });
@@ -1874,6 +2045,9 @@ export class Skadi {
     // agent picks it up on its next round, the way a finished background task
     // does. Other chats are unaffected: they get their own turn.
     const live = this.turns.get(sessionId);
+    if (!live && sessionId && this.subagents.has(sessionId)) {
+      throw new Error('This chat is still running its research subagent. Stop it before sending another message.');
+    }
     // `running` is read before the content is built, with nothing awaited in
     // between: the uploads are stored on the session as a side effect of
     // building it, so a steer that lost the race would file every attachment
@@ -1952,6 +2126,9 @@ export class Skadi {
     } else session.model = provider.model;
 
     session.webSearch = opts.webSearch == null ? session.webSearch !== false : opts.webSearch !== false;
+    session.subagents = opts.subagents == null
+      ? (session.subagents ?? this.settings.autoSubagents !== false)
+      : opts.subagents !== false;
     this.appendUserMessage(session, text, uploads, provider);
 
     // Persist the turn before the run starts: if the app restarts, crashes
@@ -1963,7 +2140,39 @@ export class Skadi {
     // has just created by sending into it, so nothing else may borrow it.
     this.broadcast('agent_session', { id: session.id, title: session.title });
 
-    const agent = await this.makeAgent(provider, model, { webSearch: session.webSearch });
+    // A no-reasoning router automatically hands bounded discovery to a
+    // read-only child. The parent receives only the report, keeping exploratory
+    // tool chatter out of its context and leaving edits/verification under the
+    // parent agent's control.
+    try {
+      const delegation = session.subagents && typeof this.planDelegation === 'function'
+        ? await this.planDelegation(provider, model, text)
+        : null;
+      if (delegation?.delegate && delegation.task) {
+        this.broadcast('agent_subagent', { sessionId: session.id, state: 'running', task: delegation.task, reasoning: delegation.reasoning });
+        const report = await this.runSubagent(provider, model, {
+          task: delegation.task,
+          reasoning: delegation.reasoning,
+          webSearch: session.webSearch,
+          sessionId: session.id,
+          session,
+        });
+        session.messages.push({
+          role: 'system',
+          content: `[Automatic read-only subagent report; reasoning=${delegation.reasoning}]\n${report}\n\nUse this evidence. Do not repeat the same exploration in the parent turn.`,
+        });
+        await this.sessions.save(session);
+        this.broadcast('agent_subagent', { sessionId: session.id, state: 'done', task: delegation.task, reasoning: delegation.reasoning });
+      }
+    } catch (err) {
+      if (err.code === 'SUBAGENT_ABORTED') throw err;
+      // Delegation improves the turn but must never prevent it. The parent can
+      // still proceed with its own tools when routing or the child fails.
+      console.error('[subagent]', err.message);
+      this.broadcast('agent_subagent', { sessionId: session.id, state: 'failed', error: err.message });
+    }
+
+    const agent = await this.makeAgent(provider, model, { webSearch: session.webSearch, subagents: session.subagents });
     // Per-turn tool context: background tasks tag this session, and file
     // edits push undo snapshots here (capped; before-images clipped). They
     // ride along in the session file so Undo survives a restart.
@@ -1978,7 +2187,7 @@ export class Skadi {
     // cannot save the file back after the delete and resurrect the chat.
     const turn = { agent, session, deleted: false };
     this.turns.set(session.id, turn);
-    this.broadcast('turns', { sessionIds: [...this.turns.keys()] });
+    this.broadcastTurns();
     // Keep a lineage log on the session: what each compaction replaced. The
     // messages themselves go to `session.archive` (see agent.archive above);
     // this records why the live transcript changed shape.
@@ -2037,7 +2246,7 @@ export class Skadi {
       if (askTitle) session.titleAsked = true;
       if (!turn.deleted) await this.sessions.save(session);
       if (this.turns.get(session.id) === turn) this.turns.delete(session.id);
-      this.broadcast('turns', { sessionIds: [...this.turns.keys()] });
+      this.broadcastTurns();
       if (askTitle && !turn.deleted) this.refineTitle(session.id, provider, model, text);
     }
     return session;
@@ -2054,7 +2263,7 @@ export class Skadi {
     try {
       // The chat may have started another turn meanwhile; that turn's own
       // saves would overwrite a title written only to disk.
-      const live = this.turns.get(id)?.session;
+      const live = this.liveSession(id);
       const session = live ?? await this.sessions.get(id);
       if (!session.titleAuto) return; // renamed by hand while we were asking
       session.title = title;
@@ -2072,19 +2281,21 @@ export class Skadi {
    */
   async stopTurn(id) {
     const live = this.turns.get(id);
-    if (!live) return false;
-    live.deleted = true;
-    live.agent.abort();
+    const children = this.subagents.get(id);
+    if (!live && !children?.size) return false;
+    if (live) live.deleted = true;
+    this.abortSessionWork(id);
     // The run loop clears its entry in a `finally`; give it that chance rather
     // than racing it. A turn wedged in a tool call is dropped from the list
     // anyway -- the delete matters more than the bookkeeping.
-    for (let i = 0; i < 40 && this.turns.get(id) === live; i++) {
+    for (let i = 0; i < 40 && this.isSessionWorking(id); i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    if (this.turns.get(id) === live) {
+    if (live && this.turns.get(id) === live) {
       this.turns.delete(id);
-      this.broadcast('turns', { sessionIds: [...this.turns.keys()] });
     }
+    this.subagents.delete(id);
+    this.broadcastTurns();
     return true;
   }
 
@@ -2111,7 +2322,7 @@ export class Skadi {
   }
 
   async mutateSession(id, fn) {
-    const live = this.turns.get(id)?.session;
+    const live = this.liveSession(id);
     if (live) {
       await fn(live);
       return live;
@@ -2236,7 +2447,7 @@ export class Skadi {
             workspace: this.workspace,
             // A reloaded window has no idea which turns are mid-flight; this
             // lets it pick them back up instead of sitting there idle.
-            turns: [...this.turns.keys()],
+            turns: this.workingSessionIds(),
           });
         }
 
@@ -2515,10 +2726,10 @@ export class Skadi {
           };
           // A chat mid-turn owns its transcript; patching the file underneath it
           // would be overwritten by the turn's next save.
-          const live = this.turns.get(id);
+          const live = this.liveSession(id);
           if (live) {
-            apply(live.session);
-            return json(200, { provider: live.session.provider, model: live.session.model ?? null });
+            apply(live);
+            return json(200, { provider: live.provider, model: live.model ?? null });
           }
           const session = await this.sessions.get(id);
           apply(session);
@@ -2527,12 +2738,19 @@ export class Skadi {
         }
         case 'POST session/web-search': {
           const { id, enabled } = await readBody();
-          const live = this.turns.get(id);
-          if (live) return json(409, { error: 'Web search cannot change while this chat is running.' });
+          if (this.isSessionWorking(id)) return json(409, { error: 'Web search cannot change while this chat is running.' });
           const session = await this.sessions.get(id);
           session.webSearch = Boolean(enabled);
           await this.sessions.save(session, { touch: false });
           return json(200, { webSearch: session.webSearch });
+        }
+        case 'POST session/subagents': {
+          const { id, enabled } = await readBody();
+          if (this.isSessionWorking(id)) return json(409, { error: 'Subagents cannot change while this chat is running.' });
+          const session = await this.sessions.get(id);
+          session.subagents = Boolean(enabled);
+          await this.sessions.save(session, { touch: false });
+          return json(200, { subagents: session.subagents });
         }
         case 'GET provider/models': {
           const id = url.searchParams.get('id');
@@ -2797,8 +3015,9 @@ export class Skadi {
         }
         case 'POST sessions/wipe': {
           const active = loadProjects().active;
-          for (const [id, t] of this.turns) {
-            if (!active || (t.session.projectId ?? null) === active) await this.stopTurn(id);
+          for (const id of this.workingSessionIds()) {
+            const session = this.liveSession(id);
+            if (!active || (session?.projectId ?? null) === active) await this.stopTurn(id);
           }
           return json(200, { count: await this.sessions.wipe(active) });
         }
@@ -2829,7 +3048,7 @@ export class Skadi {
           // Manual compaction, the Hermes /compress equivalent: summarise the
           // session's older messages now instead of waiting for the preflight.
           const { id } = await readBody();
-          if (this.turns.has(id)) return json(409, { error: 'that chat is mid-turn; stop it first' });
+          if (this.isSessionWorking(id)) return json(409, { error: 'that chat is mid-turn; stop it first' });
           const target = await this.sessions.get(id);
           const cProvider = this.providerFor({ provider: target.provider, model: target.model });
           if (cProvider.managed) await this.detectExternal();
@@ -2930,7 +3149,7 @@ export class Skadi {
             return json(400, { error: 'Confirmation required.' });
           }
           // A turn writing files underneath a bulk revert would race it.
-          if (this.turns.has(sessionId)) return json(409, { error: 'This chat is still working. Stop the turn first.' });
+          if (this.isSessionWorking(sessionId)) return json(409, { error: 'This chat is still working. Stop the turn first.' });
           try {
             let outcome;
             const session = await this.mutateSession(sessionId, async (s) => {
@@ -2960,10 +3179,17 @@ export class Skadi {
             const file = safePath(this.workspace, String(path || ''));
             if (!existsSync(file)) return json(404, { error: `no such file: ${path}` });
             // /select opens the parent folder with the file highlighted.
-            const child = spawn('explorer.exe', [`/select,"${file}"`], {
+            // Keep the switch and path as separate argv entries. Node will
+            // quote the path when needed, while Explorer still receives its
+            // required comma delimiter as `/select, <path>`.
+            const child = spawn('explorer.exe', ['/select,', file], {
               windowsHide: true,
               detached: true,
               stdio: 'ignore',
+            });
+            await new Promise((resolve, reject) => {
+              child.once('spawn', resolve);
+              child.once('error', reject);
             });
             child.unref();
             return json(200, { ok: true });
@@ -3000,7 +3226,7 @@ export class Skadi {
         // ---- the turn ----------------------------------------------------
         case 'POST chat': {
           const {
-            sessionId, draftKey, message, attachments = [], effort = 'default', provider, model, webSearch = true,
+            sessionId, draftKey, message, attachments = [], effort = 'default', provider, model, webSearch = true, subagents = true,
           } = await readBody();
           json(202, { accepted: true, attachments: describeAttachments(attachments) });
           // The chat a failure belongs to. For a brand-new chat that is not
@@ -3013,7 +3239,7 @@ export class Skadi {
           // end left the rail pulsing “working…” over a chat that had
           // finished. The turn announces itself at the start, and the window
           // refreshes the row from `agent_done`.
-          this.chat(sessionId, message, attachments, { effort, onSession, draftKey, provider, model, webSearch }).catch((err) => {
+          this.chat(sessionId, message, attachments, { effort, onSession, draftKey, provider, model, webSearch, subagents }).catch((err) => {
             // Also log it: a turn can fail with no browser attached, and a
             // silent failure is the hardest kind to debug.
             console.error('[agent]', err.message);
@@ -3024,17 +3250,18 @@ export class Skadi {
             this.broadcast('agent_error', { error: err.message, sessionId: failedIn });
             // Authoritative running list, in case the failure landed before
             // the turn was ever registered (no `turns` event would follow).
-            this.broadcast('turns', { sessionIds: [...this.turns.keys()] });
+            this.broadcastTurns();
           });
           return;
         }
         case 'POST abort': {
           // Stop one chat's turn, or every running turn when none is named.
           const { sessionId } = await readBody().catch(() => ({}));
-          const targets = sessionId ? [this.turns.get(sessionId)].filter(Boolean) : [...this.turns.values()];
-          for (const t of targets) t.agent.abort();
+          const ids = sessionId ? [sessionId] : this.workingSessionIds();
+          let stopped = 0;
+          for (const id of ids) stopped += this.abortSessionWork(id);
           for (const [id] of this.pendingApprovals) this.resolveApproval(id, false);
-          return json(200, { ok: true, stopped: targets.length });
+          return json(200, { ok: true, stopped });
         }
         case 'POST approve': {
           const { id, allow } = await readBody();
@@ -3047,11 +3274,17 @@ export class Skadi {
           // mid-session permission-mode switch (or any other tweak) applies to
           // the very next tool call instead of the next turn.
           for (const t of this.turns.values()) t.agent.settings = this.settings;
+          for (const children of this.subagents.values()) {
+            for (const child of children) child.agent.settings = this.settings;
+          }
           return json(200, this.settings);
         case 'POST settings/reset':
           this.settings = resetSettings();
           this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
           for (const t of this.turns.values()) t.agent.settings = this.settings;
+          for (const children of this.subagents.values()) {
+            for (const child of children) child.agent.settings = this.settings;
+          }
           return json(200, this.settings);
 
         default:
@@ -3102,7 +3335,7 @@ export class Skadi {
     // that reconnected (sleep, a dropped stream, a reload mid-turn) keeps
     // whatever it last inferred -- and a chat stuck "running" is a composer
     // that never comes back.
-    res.write(`event: turns\ndata: ${JSON.stringify({ sessionIds: [...this.turns.keys()] })}\n\n`);
+    res.write(`event: turns\ndata: ${JSON.stringify({ sessionIds: this.workingSessionIds() })}\n\n`);
     res.write(`event: web_search_status\ndata: ${JSON.stringify(this.webSearchStatus)}\n\n`);
 
     const keepAlive = setInterval(() => res.write(': ping\n\n'), 20000);

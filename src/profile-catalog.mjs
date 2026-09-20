@@ -17,10 +17,10 @@ export const CATALOG_VRAM_GB = 16;
 
 export const PROFILE_CATALOG = Object.freeze({
   "qwen38-27b-iq3s-128k": {
-    "label": "Qwen3.8-27B · IQ3_S + MTP · 128K · q5_1 cache",
+    "label": "Qwen3.8-27B · IQ3_S + MTP · 64K · q5_1 cache",
     "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
-    "alias": "qwen3.8-27b-iq3_s-mtp-128k-fast",
-    "ctx": 131072,
+    "alias": "qwen3.8-27b-iq3_s-mtp-64k-fast",
+    "ctx": 65536,
     "ngl": 99,
     "ngld": 99,
     "threads": 8,
@@ -68,8 +68,8 @@ export const PROFILE_CATALOG = Object.freeze({
       "tier": "recommended",
       "note": "Recommended. The fastest option, and the same quality as the other IQ3_S profiles.",
       "kv": "q5_1",
-      "ctx": 131072,
-      "ctxLabel": "128K"
+      "ctx": 65536,
+      "ctxLabel": "64K"
     }
   },
   "qwen38-27b-iq4xs-80k": {

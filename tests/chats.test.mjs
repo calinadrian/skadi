@@ -206,6 +206,7 @@ test('a compacted chat reads back whole, in the order it was said', async () => 
 function harness(store, run) {
   const events = [];
   const titled = [];
+  const agentOptions = [];
   const agent = {
     running: false,
     toolCtx: {},
@@ -224,6 +225,7 @@ function harness(store, run) {
   const skadi = {
     sessions: store,
     turns: new Map(),
+    subagents: new Map(),
     settings: {},
     config: { profiles: {}, activeProfile: 'p' },
     skills: { list: async () => [] },
@@ -235,13 +237,21 @@ function harness(store, run) {
     closeBrowser: async () => {},
     broadcast: (type, data) => events.push({ type, data }),
     stopTurn: Skadi.prototype.stopTurn,
+    workingSessionIds: Skadi.prototype.workingSessionIds,
+    isSessionWorking: Skadi.prototype.isSessionWorking,
+    liveSession: Skadi.prototype.liveSession,
+    broadcastTurns: Skadi.prototype.broadcastTurns,
+    abortSessionWork: Skadi.prototype.abortSessionWork,
     chat: Skadi.prototype.chat,
     userContent: Skadi.prototype.userContent,
     appendUserMessage: Skadi.prototype.appendUserMessage,
     // Naming a new chat asks the model; a test double records the ask instead.
     refineTitle(id, provider, model, text) { titled.push({ id, text }); },
   };
-  return { skadi, agent, events, titled, makeAgent: async () => agent };
+  return { skadi, agent, events, titled, agentOptions, makeAgent: async (provider, model, options) => {
+    agentOptions.push(options);
+    return agent;
+  } };
 }
 
 const { Skadi } = await import('../src/server.mjs');
@@ -261,6 +271,22 @@ test('a finished turn leaves the chat idle, and says so exactly once', async () 
     assert.deepEqual(turns.at(0).data.sessionIds, [session.id]);
     assert.deepEqual(turns.at(-1).data.sessionIds, []);
     assert.equal(h.skadi.turns.size, 0);
+  });
+});
+
+test('a chat can disable subagents and skip delegation entirely', async () => {
+  await withStore(async (store) => {
+    const h = harness(store, async () => {});
+    let planned = 0;
+    h.skadi.planDelegation = async () => { planned++; return { delegate: true, task: 'inspect' }; };
+    h.skadi.makeAgent = h.makeAgent;
+
+    const session = await h.skadi.chat(null, 'fix it', [], { subagents: false });
+    const saved = await store.get(session.id);
+
+    assert.equal(planned, 0, 'the router request is skipped too');
+    assert.equal(saved.subagents, false);
+    assert.equal(h.agentOptions.at(-1).subagents, false);
   });
 });
 
@@ -311,6 +337,33 @@ test('a chat deleted mid-turn stays deleted, however slow the turn is to stop', 
     await assert.rejects(store.get(id), /no session/);
     assert.deepEqual(await store.list(), [], 'a deleted chat must not be saved back into existence');
   });
+});
+
+test('a research subagent is visible and cancellable before its parent starts', () => {
+  const events = [];
+  const child = { aborted: false, abort() { this.aborted = true; } };
+  const skadi = {
+    turns: new Map(),
+    subagents: new Map(),
+    broadcast: (type, data) => events.push({ type, data }),
+    workingSessionIds: Skadi.prototype.workingSessionIds,
+    broadcastTurns: Skadi.prototype.broadcastTurns,
+    trackSubagent: Skadi.prototype.trackSubagent,
+    untrackSubagent: Skadi.prototype.untrackSubagent,
+    abortSessionWork: Skadi.prototype.abortSessionWork,
+  };
+
+  const record = skadi.trackSubagent('chat-1', { id: 'chat-1' }, child);
+  assert.deepEqual(skadi.workingSessionIds(), ['chat-1']);
+  assert.deepEqual(events.at(-1), { type: 'turns', data: { sessionIds: ['chat-1'] } });
+
+  assert.equal(skadi.abortSessionWork('chat-1'), 1);
+  assert.equal(child.aborted, true);
+  assert.equal(record.cancelled, true);
+
+  skadi.untrackSubagent('chat-1', record);
+  assert.deepEqual(skadi.workingSessionIds(), []);
+  assert.deepEqual(events.at(-1), { type: 'turns', data: { sessionIds: [] } });
 });
 
 // --------------------------------------------------------------- rail order --

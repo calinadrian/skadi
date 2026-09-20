@@ -9,10 +9,17 @@ import {
   compactionSettings,
   estimateTokens,
   isContextOverflow,
+  clipTailToolOutputs,
   splitForCompaction,
   truncateForSummary,
   SUMMARY_PROMPT,
 } from './compaction.mjs';
+import {
+  createProgressLedger,
+  observeToolRound,
+  recordLoop,
+  progressLedgerText,
+} from './progress-ledger.mjs';
 
 const BASE_PROMPT = `You are Skadi, a coding agent running on the user's Windows machine.
 
@@ -20,9 +27,12 @@ You work by calling tools. Prefer acting over narrating: read the files you need
 
 Guidelines:
 - Read a file before editing it. Never guess at its contents.
+- Locate symbols with grep before reading broad files. Read the smallest useful numbered line range; for files over 256 KB, always pass start_line and end_line instead of using the shell as a workaround.
 - Make the smallest change that does the job, and match the surrounding style.
 - After editing code, run the relevant test or build command if one exists.
 - If a tool fails, read the error and adapt. Do not retry the identical call.
+- For implementation work, move deliberately through locate, diagnose, implement, and verify. A plausible theory is not a diagnosis, and a syntax check is not runtime proof.
+- Delegate bounded discovery, searching, code-location, and summarisation work with delegate_task before doing broad exploration yourself. Use reasoning "none" for routine find/search/summary tasks; increase it only when the delegated analysis genuinely needs it. Keep edits and final runtime verification in the parent agent.
 - When you are done, say plainly what you changed. If something did not work, say so.
 - This chat is the only one you can see. Other sessions are private and the harness blocks every path into them, so never go looking for them: what you know of earlier work is what is in this conversation, in memory, or in the project itself. If the user's request depends on something from another chat, ask them for it.`;
 
@@ -72,7 +82,7 @@ export class Agent extends EventEmitter {
    * @param {object} opts.tools name -> { schema, run, mutates }
    * @param {(call) => Promise<boolean>} opts.approve gate for mutating tools
    */
-  constructor({ provider, model, tools, schemas, settings, approve, contextTokens = null, summaryModel = null }) {
+  constructor({ provider, model, tools, schemas, settings, approve, contextTokens = null, summaryModel = null, reviewProgress = null, stopOnLoop = false }) {
     super();
     this.provider = provider;
     this.model = model;
@@ -90,6 +100,15 @@ export class Agent extends EventEmitter {
     // managed llama-server, the provider's figure for hosted APIs. Null means
     // unknown -- automatic preflight is skipped but manual compaction works.
     this.contextTokens = contextTokens;
+    // Optional semantic supervisor supplied by the server. It judges the
+    // completed action against the user's request; it does not use a timer or
+    // a round-count heuristic. A detected bad step is removed from the active
+    // model context while remaining archived in the saved chat.
+    this.reviewProgress = reviewProgress;
+    // Focused read-only children should hand control back to their parent as
+    // soon as the semantic supervisor confirms they are no longer making
+    // progress. A parent agent instead gets guidance and may adapt in place.
+    this.stopOnLoop = Boolean(stopOnLoop);
     // Tool schemas ride on every request alongside the transcript, so they
     // count toward the window too. Cached: schemas do not change mid-turn.
     this.schemasTokens = estimateTokens([{ role: 'system', content: JSON.stringify(schemas || []) }]);
@@ -183,18 +202,22 @@ export class Agent extends EventEmitter {
     this.autoCompactBlocked = false;
     let rounds = 0;
     let roundRetried = false; // overflow-recovery retry used for this round
-    // 0 (or negative) means no ceiling: the turn ends when the model stops
-    // calling tools. Anything positive caps a confused model that would
-    // otherwise loop forever burning tokens at single-digit t/s.
-    const maxRounds = this.settings.maxToolRounds ?? 24;
-    const bounded = Number.isFinite(maxRounds) && maxRounds > 0;
+    // Positive values are an optional emergency ceiling. Zero leaves stopping
+    // to semantic loop detection and the model completing the task.
+    const configuredRounds = Number(this.settings.maxToolRounds);
+    const maxRounds = Number.isFinite(configuredRounds) && configuredRounds > 0 ? Math.floor(configuredRounds) : 0;
+    const bounded = maxRounds > 0;
     const turnStarted = Date.now();
     let totalTokens = 0;
+    let loopGuidance = '';
+    const initialRequest = [...messages].reverse().find((message) => message.role === 'user');
+    const ledger = createProgressLedger(typeof initialRequest?.content === 'string' ? initialRequest.content : '');
 
     try {
       while (!bounded || rounds < maxRounds) {
         rounds++;
         this.emit('round', { round: rounds, maxRounds });
+        const roundStart = messages.length;
 
         // Preflight (opencode-style): compact before the request goes out when
         // the transcript is already pressing against the window, so the turn
@@ -218,7 +241,7 @@ export class Agent extends EventEmitter {
 
         let reply;
         try {
-          reply = await this._stream(messages, sampling);
+          reply = await this._stream(messages, sampling, [progressLedgerText(ledger), loopGuidance].filter(Boolean).join('\n\n'));
         } catch (err) {
           // Overflow recovery: one compact-and-retry per round. A second
           // rejection means the window genuinely cannot hold the work, and
@@ -227,7 +250,7 @@ export class Agent extends EventEmitter {
             roundRetried = true;
             const result = await this.compact(messages, { manual: false });
             if (!result.compacted) throw err;
-            reply = await this._stream(messages, sampling);
+            reply = await this._stream(messages, sampling, [progressLedgerText(ledger), loopGuidance].filter(Boolean).join('\n\n'));
           } else {
             throw err;
           }
@@ -273,10 +296,57 @@ export class Agent extends EventEmitter {
           return messages;
         }
 
+        const toolResults = [];
         for (const call of reply.message.tool_calls) {
           const result = await this._invoke(call);
+          toolResults.push(result);
           await this._append(messages, { role: 'tool', tool_call_id: call.id, content: result.content });
           this.emit('tool_result', { id: call.id, name: call.function.name, ...result });
+        }
+
+        const deterministic = observeToolRound(ledger, reply.message.tool_calls, toolResults).repeated;
+
+        if (this.settings.loopDetection !== false && this.reviewProgress && !this.pendingImages.length) {
+          let review = deterministic;
+          if (!review) {
+            try {
+              review = await this.reviewProgress({
+                messages,
+                roundStart,
+                round: rounds,
+                signal: this.abortController?.signal,
+                ledger: progressLedgerText(ledger),
+              });
+            } catch (err) {
+              if (this.abortController?.signal.aborted) throw err;
+              this.emit('loop_review_error', { error: err.message });
+            }
+          }
+          if (review?.loop) {
+            const strikes = deterministic?.strikes || recordLoop(ledger);
+            const safeToPrune = reply.message.tool_calls.every((call) => !this.tools[call.function.name]?.mutates);
+            const removed = safeToPrune ? messages.splice(roundStart) : [];
+            if (removed.length) await this.archive?.(removed);
+            const escalation = strikes >= 2 ? '\nThis approach has now stalled repeatedly. Do not use it again in this turn.' : '';
+            loopGuidance = `A progress supervisor detected a loop in the previous action and removed that action from your active context. Reason: ${review.reason || 'it did not add new evidence toward the request.'}\nNext action: ${review.next || 'return to the original request, choose one decisive test, then implement or report a precise blocker.'}${escalation}\nDo not repeat or paraphrase the removed action.`;
+            if (!safeToPrune) loopGuidance = loopGuidance.replace(' and removed that action from your active context', '; the action may have had side effects, so its record was retained');
+            this.emit('loop_detected', { round: rounds, reason: review.reason || '', next: review.next || '', removed: removed.length });
+            this.emit('transcript', { reason: 'loop_prune' });
+            await this.persist?.();
+            if (this.stopOnLoop) {
+              const note = `Research handed back to the parent after the progress supervisor detected no useful progress. ${review.reason ? `Reason: ${review.reason}. ` : ''}${review.next ? `Recommended next action: ${review.next}.` : ''}`.trim();
+              await this._append(messages, { role: 'assistant', content: note });
+              this.emit('done', {
+                rounds,
+                semanticHandoff: true,
+                totalTokens,
+                turnMs: Date.now() - turnStarted,
+              });
+              return messages;
+            }
+            continue;
+          }
+          loopGuidance = '';
         }
 
         // Hand over any screenshots the tools produced, as a user turn --
@@ -295,7 +365,7 @@ export class Agent extends EventEmitter {
         if (await this._drainSteers(messages)) rounds = 0;
       }
 
-      const note = `Stopped after ${maxRounds} tool rounds without finishing. Raise "Max tool rounds" in settings if this task genuinely needs more.`;
+      const note = `Stopped at the optional emergency ceiling of ${maxRounds} tool rounds. Semantic loop detection remained active; raise or disable the ceiling if this task is intentionally larger.`;
       await this._append(messages, { role: 'assistant', content: note });
       this.emit('done', { rounds, truncated: true, totalTokens, turnMs: Date.now() - turnStarted });
       return messages;
@@ -352,13 +422,28 @@ export class Agent extends EventEmitter {
       return result;
     };
 
-    const { system, head, tail } = splitForCompaction(messages, cfg.keepMessages);
-    if (!head.length) return fail('nothing to compact');
+    // Unknown window (API provider without a figure) falls back to a wide
+    // static budget.
+    const window = contextTokens || 128000;
+    const tailTokens = Math.floor(window * cfg.tailFraction);
+    const split = splitForCompaction(messages, cfg.keepMessages, { tailTokens });
+    const { system, head } = split;
+    const tail = clipTailToolOutputs(split.tail, tailTokens);
+    if (!head.length && tail === split.tail) return fail('nothing to compact');
+    if (!head.length) {
+      // Nothing old to summarise: the window is full of a few giant tool
+      // results. Clipping them is the whole compaction.
+      messages.length = 0;
+      messages.push(...system, ...tail);
+      this.emit('transcript', { reason: 'compaction' });
+      try { await this.persist?.(); } catch { /* the turn's own save covers it */ }
+      const result = { compacted: true, before, after: this.requestTokens(messages), dropped: 0, kept: tail.length, contextTokens, summaryModel: null };
+      this.emit('compact_end', { manual, ...result });
+      return result;
+    }
 
     // The summary request must itself fit: cap tool outputs, then shed the
-    // oldest head messages first when even that is not enough. Unknown window
-    // (API provider without a figure) falls back to a wide static budget.
-    const window = contextTokens || 128000;
+    // oldest head messages first when even that is not enough.
 
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -559,13 +644,18 @@ export class Agent extends EventEmitter {
     }
   }
 
-  async _stream(messages, sampling) {
+  async _stream(messages, sampling, guidance = '') {
     this.abortController = new AbortController();
     const partial = { content: '', reasoning: '' };
     this.partial = partial;
     const result = await streamCompletion(
       this.provider,
-      { model: this.model, messages, tools: this.schemas, sampling },
+      {
+        model: this.model,
+        messages: guidance ? [...messages, { role: 'system', content: guidance }] : messages,
+        tools: this.schemas,
+        sampling,
+      },
       {
         onText: (t) => {
           partial.content += t;

@@ -6,9 +6,10 @@
 // been talked into writing to C:\Windows should fail on the path check, not on
 // good intentions.
 import { readFile, writeFile, mkdir, readdir, stat, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { resolve, relative, join, sep, dirname, basename } from 'node:path';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { unifiedDiff, statLine } from './diff.mjs';
 import { ROOT } from './config.mjs';
 
@@ -94,6 +95,100 @@ function clip(text) {
   return `${text.slice(0, MAX_OUTPUT_CHARS)}\n... [truncated, ${text.length - MAX_OUTPUT_CHARS} more characters]`;
 }
 
+const inside = (root, target) => {
+  const rel = relative(root, target);
+  return rel === '' || (!rel.startsWith('..') && !rel.includes(':'));
+};
+
+/**
+ * Fast content search when ripgrep is installed. Returns null only when rg is
+ * unavailable or cannot parse a pattern that JavaScript may still support.
+ */
+function searchWithRipgrep(root, { pattern, glob, ignoreCase }) {
+  const args = [
+    '--line-number', '--no-heading', '--color', 'never', '--hidden',
+    '--max-columns', '240', '--max-columns-preview',
+  ];
+  if (ignoreCase) args.push('--ignore-case');
+  if (glob) args.push('--glob', glob);
+  for (const dir of SKIP_DIRS) args.push('--glob', `!**/${dir}/**`);
+  for (const dir of PRIVATE_DIRS) {
+    if (!inside(root, dir)) continue;
+    const rel = relative(root, dir).split(sep).join('/');
+    if (rel) args.push('--glob', `!${rel}/**`);
+  }
+  args.push('--', pattern, '.');
+
+  return new Promise((resolveSearch) => {
+    let settled = false;
+    let text = '';
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolveSearch(value);
+    };
+    let child;
+    try {
+      child = spawn('rg', args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return finish(null);
+    }
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      text += chunk;
+      const lines = text.split(/\r?\n/);
+      if (lines.length > 200) {
+        text = lines.slice(0, 200).join('\n');
+        child.kill();
+      }
+    });
+    child.on('error', () => finish(null));
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0 && code !== 1 && !text.trim()) return finish(null);
+      const normalized = text.trim().split(/\r?\n/).map((line) => {
+        const colon = line.indexOf(':');
+        if (colon < 0) return line;
+        const path = line.slice(0, colon).replace(/^\.[/\\]/, '').replace(/\\/g, '/');
+        return `${path}${line.slice(colon)}`;
+      }).join('\n');
+      finish(normalized || '');
+    });
+  });
+}
+
+/** Portable fallback that searches files line-by-line instead of loading them whole. */
+async function searchWithJavaScript(root, { re, fileFilter }) {
+  const hits = [];
+  for await (const rel of walk(root, root)) {
+    if (fileFilter && !fileFilter.test(rel)) continue;
+    const input = createReadStream(join(root, rel), { encoding: 'utf8' });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    let lineNumber = 0;
+    try {
+      for await (const line of lines) {
+        lineNumber++;
+        // A NUL is a strong binary-file signal. Stop before binary noise can
+        // consume the search output or model context.
+        if (line.includes('\0')) break;
+        if (!re.test(line)) continue;
+        hits.push(`${rel}:${lineNumber}: ${line.trim().slice(0, 200)}`);
+        if (hits.length >= 200) {
+          input.destroy();
+          return hits.join('\n');
+        }
+      }
+    } catch {
+      // Unreadable or concurrently replaced files are simply skipped, matching
+      // ripgrep's repository-search behavior.
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+  }
+  return hits.join('\n');
+}
+
 /** Convert a glob to a regex. Supports *, **, ? and {a,b} alternation. */
 function globToRegExp(pattern) {
   let out = '';
@@ -145,7 +240,7 @@ export function buildTools(ctx) {
     read_file: {
       schema: {
         description:
-          'Read a UTF-8 text file from the workspace. Returns numbered lines so you can refer to them precisely.',
+          'Read numbered lines from a UTF-8 workspace file. Search with grep first, then use start_line/end_line for the relevant region. Files over 256 KB require an explicit line range.',
         parameters: {
           type: 'object',
           properties: {
@@ -161,14 +256,16 @@ export function buildTools(ctx) {
         const info = await stat(file).catch(() => null);
         if (!info) throw new ToolError(`no such file: ${path}`);
         if (info.isDirectory()) throw new ToolError(`${path} is a directory; use list_dir`);
-        if (info.size > MAX_READ_BYTES) {
+        const ranged = Number.isInteger(start_line) || Number.isInteger(end_line);
+        if (info.size > MAX_READ_BYTES && !ranged) {
           throw new ToolError(
-            `${path} is ${(info.size / 1024).toFixed(0)} KB, over the ${MAX_READ_BYTES / 1024} KB limit. Read a line range instead.`,
+            `${path} is ${(info.size / 1024).toFixed(0)} KB, over the ${MAX_READ_BYTES / 1024} KB whole-file limit. Retry with an explicit range, for example: {"path":"${path}","start_line":1,"end_line":200}.`,
           );
         }
         const lines = (await readFile(file, 'utf8')).split(/\r?\n/);
         const from = Math.max(1, start_line || 1);
         const to = Math.min(lines.length, end_line || lines.length);
+        if (to < from) throw new ToolError(`end_line must be greater than or equal to start_line (${from})`);
         const body = lines
           .slice(from - 1, to)
           .map((line, i) => `${String(from + i).padStart(5)}\t${line}`)
@@ -290,7 +387,7 @@ export function buildTools(ctx) {
 
     grep: {
       schema: {
-        description: 'Search file contents with a regular expression. Returns path:line: match.',
+        description: 'Search repository contents before reading files. Uses ripgrep when available and a streaming fallback otherwise. Searches large files and returns path:line: match.',
         parameters: {
           type: 'object',
           properties: {
@@ -310,26 +407,11 @@ export function buildTools(ctx) {
         }
         const fileFilter = glob ? globToRegExp(glob) : null;
         const root = resolve(ctx.workspace);
-        const hits = [];
-        for await (const rel of walk(root, root)) {
-          if (fileFilter && !fileFilter.test(rel)) continue;
-          const info = await stat(join(root, rel)).catch(() => null);
-          if (!info || info.size > MAX_READ_BYTES) continue;
-          let text;
-          try {
-            text = await readFile(join(root, rel), 'utf8');
-          } catch {
-            continue;
-          }
-          const lines = text.split(/\r?\n/);
-          for (let i = 0; i < lines.length; i++) {
-            if (re.test(lines[i])) {
-              hits.push(`${rel}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
-              if (hits.length >= 200) return clip(hits.join('\n'));
-            }
-          }
-        }
-        return hits.length ? clip(hits.join('\n')) : `no matches for ${pattern}`;
+        const native = await searchWithRipgrep(root, { pattern, glob, ignoreCase: ignore_case });
+        const result = native == null
+          ? await searchWithJavaScript(root, { re, fileFilter })
+          : native;
+        return result ? clip(result) : `no matches for ${pattern}`;
       },
     },
 

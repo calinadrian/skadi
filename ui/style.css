@@ -1974,7 +1974,7 @@ input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; marg
 }
 .panel.flash { animation: panelFlash 1.2s ease; }
 
-/* ========================================================================== 
+/* ==========================================================================
    Professional desktop shell
 
    The original interface was intentionally dense. This layer keeps its
@@ -3070,7 +3070,7 @@ body.generating .chat-row.active .chat-sub { color: var(--accent); animation: pu
 .local-ai-pane #tasksPanel { display: none; }
 .local-ai-pane .server-btns { display: flex; flex-wrap: wrap; gap: 6px; }
 .local-ai-pane .server-btns .btn { flex: 1 1 auto; justify-content: center; }
-#btnLocalAI.active, #btnTerminalDock.active { color: var(--accent); background: var(--accent-soft); }
+#btnTerminalDock.active { color: var(--accent); background: var(--accent-soft); }
 
 /* Drag handle on the terminal's top edge; the mirror of the rail gutters. */
 .dock-gutter {
@@ -3427,20 +3427,20 @@ a.mm-link { width: fit-content; }
 }
 .bar-group { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .composer-bar .attach-btn { margin: 0; width: 32px; height: 32px; border-radius: 8px; }
-.composer-bar .web-search-toggle {
+.composer-bar .capability-toggle {
   width: 32px;
   height: 32px;
   border-radius: 8px;
   color: var(--text-faint);
 }
-.composer-bar .web-search-toggle:hover:not(:disabled) { background: var(--raised-2); color: var(--text); }
-.composer-bar .web-search-toggle.active {
+.composer-bar .capability-toggle:hover:not(:disabled) { background: var(--raised-2); color: var(--text); }
+.composer-bar .capability-toggle.active {
   background: var(--accent-row);
   color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent-edge);
 }
-.composer-bar .web-search-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.composer-bar .web-search-toggle:disabled { opacity: .45; cursor: not-allowed; }
+.composer-bar .capability-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-bar .capability-toggle:disabled { opacity: .45; cursor: not-allowed; }
 .composer-bar .send-btn { width: 34px; height: 34px; border-radius: 10px; margin-left: 4px; }
 
 /* Ghost pills: quiet until hovered, so the bar reads as one row of choices
@@ -4055,3 +4055,164 @@ label .help:hover { color: var(--text); border-color: var(--text-faint); }
 
 .loaded-retry { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid var(--line-soft); color: var(--text-faint); font-size: 12px; }
 .loaded-card:has(.loaded-retry) { flex-wrap: wrap; }
+
+/* ==========================================================================
+   Workspace dock: right-side mini panels
+   ========================================================================== */
+
+/* Keep the conversation central and place its supporting tools on the right. */
+.layout {
+  grid-template-columns: minmax(180px, var(--left-w, 236px)) minmax(0, 1fr) minmax(280px, var(--right-w, 380px));
+}
+#chatRail { grid-column: 1; grid-row: 1; }
+#inspector {
+  display: flex;
+  grid-column: 3;
+  grid-row: 1;
+  border-left: 1px solid var(--line);
+  border-right: 0;
+}
+#centre { grid-column: 2; grid-row: 1; }
+.layout.no-inspector {
+  grid-template-columns: minmax(180px, var(--left-w, 236px)) minmax(0, 1fr);
+}
+.layout.no-inspector #centre { grid-column: 2; }
+.layout.no-inspector #inspector { display: none; }
+
+/* The resize affordance sits on the dock's leading edge. */
+.tool-dock .rail-gutter.right { left: 0; right: auto; }
+.tool-dock .rail-gutter.right::after { left: 0; right: auto; }
+
+/* Browser is a labelled, top-level action. Review and Files live in the dock. */
+#btnBrowser.top-tool-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+  color: var(--text-dim);
+  font: 500 12px var(--sans);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+#btnBrowser.top-tool-btn:hover { color: var(--text); background: var(--raised-2); }
+#btnBrowser.top-tool-btn.active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-edge); }
+#btnBrowser.top-tool-btn .icon { width: 15px; height: 15px; }
+#btnBrowser.top-tool-btn .dot { right: 3px; bottom: 3px; }
+
+.tool-tabs { grid-template-columns: repeat(4, 1fr); }
+.tool-tabs button { position: relative; min-height: 52px; }
+.tool-tab-count {
+  position: absolute;
+  top: 4px;
+  right: max(4px, calc(50% - 22px));
+  display: grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  color: #05110f;
+  font: 700 9px var(--mono);
+  background: var(--accent);
+  border-radius: 999px;
+}
+.tool-tab-count[hidden] { display: none; }
+
+.tasks-pane { padding: 10px; }
+.tasks-pane #tasksPanel { display: block; margin: 0; box-shadow: none; }
+.tasks-pane .task-tail { max-height: 180px; overflow: auto; }
+
+/* Body-level review/file overlays are mounted into these hosts by app.js.
+   Reset modal positioning while retaining the existing, proven renderers. */
+.review-pane.tool-pane { height: 100%; padding: 0; overflow: hidden; }
+.embedded-host { min-width: 0; min-height: 0; }
+.review-host { height: 100%; }
+.embedded-host > .modal-veil {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  backdrop-filter: none;
+}
+.embedded-host > .modal-veil[hidden] { display: none; }
+.embedded-host > .modal-veil > .modal {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.review-host .review-head { min-height: 44px; padding: 6px 8px; }
+.review-host .review-head h2 { font-size: 12px; }
+.review-host .review-project { max-width: 110px; }
+.review-host .review-list { min-height: 0; }
+.review-host .review-file-head { min-width: 420px; }
+.review-host .review-file { overflow-x: auto; }
+
+/* Files remain visible above a file preview. The divider can be dragged, used
+   with the arrow keys, or double-clicked to restore a useful default. */
+.files-pane.tool-pane.active { overflow: hidden; }
+.files-pane .files-tree { flex: 1 1 auto; }
+.mini-gutter {
+  position: relative;
+  flex: none;
+  height: 9px;
+  margin: 0 -10px;
+  cursor: row-resize;
+  touch-action: none;
+}
+.mini-gutter::after {
+  content: "";
+  position: absolute;
+  inset: 4px 0 auto;
+  height: 1px;
+  background: var(--line);
+  transition: background .12s, box-shadow .12s;
+}
+.mini-gutter:hover::after,
+.mini-gutter:focus-visible::after,
+.mini-gutter.dragging::after { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+.mini-gutter:focus { outline: none; }
+.mini-gutter[hidden] { display: none; }
+body.resizing-mini-panel, body.resizing-mini-panel * { cursor: row-resize !important; user-select: none !important; }
+.file-host {
+  flex: 0 0 var(--file-view-h, 320px);
+  height: var(--file-view-h, 320px);
+  min-height: 160px;
+  margin: 0 -10px -12px;
+  overflow: hidden;
+  border-top: 1px solid var(--line-soft);
+}
+.file-host[hidden] { display: none; }
+.file-host .modal-head { min-height: 40px; padding: 5px 8px; }
+.file-host .modal-head h2 { font-size: 12px; }
+.file-host .file-tabs { min-height: 33px; }
+.file-host .file-path { padding-inline: 9px; }
+.file-host .diff-body { min-height: 0; overflow: auto; }
+.file-host .modal-actions { min-height: 42px; padding: 6px 8px; }
+.file-host .modal-actions .btn { min-width: 0; width: auto; font-size: 11px; }
+
+@media (max-width: 1180px) {
+  .layout { grid-template-columns: minmax(180px, var(--left-w, 220px)) minmax(0, 1fr) minmax(260px, var(--right-w, 320px)); }
+}
+@media (max-width: 940px) {
+  .layout, .layout.no-inspector { grid-template-columns: minmax(180px, var(--left-w, 220px)) minmax(0, 1fr); }
+  #inspector { display: none; }
+  #centre, .layout.no-inspector #centre { grid-column: 2; }
+  #btnBrowser.top-tool-btn span:not(.dot) { display: none; }
+  #btnBrowser.top-tool-btn { width: 34px; padding: 0; }
+}
+@media (max-width: 720px) {
+  .layout, .layout.no-inspector { grid-template-columns: minmax(0, 1fr); }
+  #centre, .layout.no-inspector #centre { grid-column: 1; }
+}

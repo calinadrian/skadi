@@ -32,6 +32,7 @@
   <symbol id="i-camera" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.8" y="4.4" width="12.4" height="9" rx="1.6"/><circle cx="8" cy="8.9" r="2.5"/><path d="M5.6 4.4 6.6 2.6h2.8l1 1.8"/></symbol>
   <symbol id="i-trash" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><path d="M3.4 4.4h9.2M6.4 4.4V3.1h3.2v1.3M4.9 4.4l.5 8.2h5.2l.5-8.2"/></symbol>
   <symbol id="i-chip" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.3" y="4.3" width="7.4" height="7.4" rx="1.2"/><path d="M6.6 1.9v2.4M9.4 1.9v2.4M6.6 11.7v2.4M9.4 11.7v2.4M1.9 6.6h2.4M1.9 9.4h2.4M11.7 6.6h2.4M11.7 9.4h2.4"/></symbol>
+  <symbol id="i-agents" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.2" cy="5.2" r="2.1"/><circle cx="11.4" cy="6.3" r="1.6"/><path d="M1.9 12.8c.4-2.2 1.6-3.4 3.5-3.4s3.1 1.2 3.5 3.4M9.2 10c.6-.6 1.3-.9 2.2-.9 1.5 0 2.5 1 2.8 2.8"/></symbol>
   <symbol id="i-win-min" viewBox="0 0 10 10"><rect x="0" y="4.6" width="10" height="1" fill="currentColor"/></symbol>
   <symbol id="i-win-max" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="9" height="9"/></symbol>
   <symbol id="i-win-restore" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="2.5" width="7" height="7"/><path d="M2.5 2.5V0.5h7v7h-2"/></symbol>
@@ -82,14 +83,13 @@
 
   <div class="spacer"></div>
 
-  <button id="btnBrowser" class="icon-btn" title="Toggle browser pane" aria-label="Toggle browser pane" aria-pressed="false"><svg class="icon"><use href="#i-globe"/></svg><span class="dot" id="browserDot" data-state="stopped"></span></button>
-  <button id="btnInspector" class="icon-btn" title="Toggle activity panel" aria-label="Toggle activity panel" aria-pressed="false"><svg class="icon"><use href="#i-panel"/></svg></button>
+  <button id="btnBrowser" class="top-tool-btn" title="Toggle browser pane" aria-label="Toggle browser pane" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg><span>Browser</span><span class="dot" id="browserDot" data-state="stopped"></span></button>
+  <button id="btnInspector" class="icon-btn" title="Toggle workspace panel" aria-label="Toggle workspace panel" aria-pressed="false"><svg class="icon"><use href="#i-panel"/></svg></button>
   <button id="btnTerminalDock" class="icon-btn" title="Toggle terminal" aria-label="Toggle terminal" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
-  <button id="btnLocalAI" class="icon-btn" title="Local AI controls" aria-label="Open Local AI controls"><svg class="icon"><use href="#i-chip"/></svg></button>
   <button id="btnChanges" class="icon-btn" title="Working tree changes" aria-label="Working tree changes"><svg class="icon"><use href="#i-diff"/></svg></button>
   <button id="btnBenchmarks" class="icon-btn" title="Benchmarks" aria-label="Benchmarks"><svg class="icon"><use href="#i-peak"/></svg></button>
 
-  <button id="btnSettings" class="icon-btn" title="Settings" aria-label="Settings"><svg class="icon"><use href="#i-gear"/></svg></button>
+  <button id="btnSettings" class="icon-btn" title="Settings" aria-label="Settings"><svg class="icon"><use href="#i-sliders"/></svg></button>
 
   <div class="window-controls" id="windowControls" hidden>
     <button class="wc" id="wcMin" title="Minimize" aria-label="Minimize"><svg class="wc-glyph"><use href="#i-win-min"/></svg></button>
@@ -187,9 +187,13 @@
             <button type="button" class="icon-btn attach-btn" id="btnAttach" title="Attach files or a folder">
               <svg class="icon"><use href="#i-clip"/></svg>
             </button>
-            <button type="button" class="icon-btn web-search-toggle active" id="btnWebSearch"
+            <button type="button" class="icon-btn capability-toggle active" id="btnWebSearch"
               title="Web search enabled for this chat" aria-label="Disable web search for this chat" aria-pressed="true">
               <svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>
+            </button>
+            <button type="button" class="icon-btn capability-toggle active" id="btnSubagents"
+              title="Subagents enabled for this chat" aria-label="Disable subagents for this chat" aria-pressed="true">
+              <svg class="icon" aria-hidden="true"><use href="#i-agents"/></svg>
             </button>
             <select id="modeSelect" class="effort-select mode-select" aria-label="Permission mode" title="Permission mode — what the agent may do without asking"></select>
           </div>
@@ -287,11 +291,11 @@
 
   </section>
 
-  <!-- --------------------------------------------------------- right tool dock -->
+  <!-- ---------------------------------------------------------- workspace dock -->
   <aside class="rail right tool-dock" id="inspector" aria-label="Workspace tools">
     <div class="rail-gutter right" id="gutterRight" tabindex="0" role="separator"
       aria-orientation="vertical" aria-label="Resize workspace tools"
-      aria-valuemin="260" aria-valuemax="560" aria-valuenow="334"
+      aria-valuemin="280" aria-valuemax="760" aria-valuenow="380"
       title="Drag to resize · double-click to reset"></div>
 
     <header class="tool-dock-head">
@@ -299,23 +303,20 @@
       <button class="icon-btn" id="btnCloseInspector" title="Close workspace tools" aria-label="Close workspace tools"><svg class="icon"><use href="#i-x"/></svg></button>
     </header>
     <nav class="tool-tabs" id="toolTabs" aria-label="Workspace tool">
-      <button type="button" class="active" data-tool="review" aria-pressed="true"><svg class="icon"><use href="#i-diff"/></svg><span>Review</span></button>
-      <button type="button" data-tool="browser" aria-pressed="false"><svg class="icon"><use href="#i-globe"/></svg><span>Browser</span></button>
-      <button type="button" data-tool="files" aria-pressed="false"><svg class="icon"><use href="#i-file"/></svg><span>Files</span></button>
-      <button type="button" data-tool="ai" aria-pressed="false"><svg class="icon"><use href="#i-chip"/></svg><span>Local AI</span></button>
+      <button type="button" class="active" data-tool="tasks" aria-label="Tasks" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg><span>Tasks</span><span class="tool-tab-count" id="taskTabCount" aria-hidden="true" hidden></span></button>
+      <button type="button" data-tool="review" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-diff"/></svg><span>Review</span></button>
+      <button type="button" data-tool="files" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>Files</span></button>
+      <button type="button" data-tool="ai" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg><span>Local AI</span></button>
     </nav>
     <div class="tool-panes">
-      <section class="tool-pane active" data-tool-pane="review">
-        <div class="tool-empty-icon"><svg class="icon"><use href="#i-diff"/></svg></div>
-        <h2>Review changes</h2>
-        <p>Inspect the current working tree and every file changed by this chat.</p>
-        <button class="btn primary" id="toolOpenChanges">Open review</button>
+      <section class="tool-pane tasks-pane active" data-tool-pane="tasks">
+        <section class="panel" id="tasksPanel">
+          <header class="panel-head"><h2>Background tasks</h2><span class="count" id="taskCount"></span></header>
+          <div class="task-list" id="taskList"></div>
+        </section>
       </section>
-      <section class="tool-pane" data-tool-pane="browser" hidden>
-        <div class="tool-empty-icon"><svg class="icon"><use href="#i-globe"/></svg></div>
-        <h2>Browser</h2>
-        <p>Open the shared browser beside the conversation to inspect and interact with your app.</p>
-        <button class="btn primary" id="toolToggleBrowser">Open browser</button>
+      <section class="tool-pane review-pane" data-tool-pane="review" hidden>
+        <div class="embedded-host review-host" id="reviewHost"></div>
       </section>
       <section class="tool-pane files-pane" data-tool-pane="files" hidden>
         <div class="files-head">
@@ -324,6 +325,9 @@
         </div>
         <input type="search" id="filesFilter" class="files-filter" placeholder="Filter files…" aria-label="Filter files" spellcheck="false" autocomplete="off">
         <div class="files-tree" id="filesTree" role="tree"></div>
+        <div class="mini-gutter" id="fileViewerGutter" tabindex="0" role="separator" aria-orientation="horizontal"
+          aria-label="Resize file preview" aria-valuemin="160" aria-valuemax="700" hidden></div>
+        <div class="embedded-host file-host" id="fileHost" hidden></div>
       </section>
 
     <section class="tool-pane local-ai-pane" data-tool-pane="ai" hidden>
@@ -352,13 +356,6 @@
       <button class="btn primary load-go" id="btnLoad">Load</button>
       <p class="hint" id="loadHint"></p>
     </section>
-
-    <section class="panel" id="tasksPanel">
-      <header class="panel-head"><h2>Background tasks</h2><span class="count" id="taskCount"></span></header>
-      <div class="task-list" id="taskList"></div>
-    </section>
-
-
 
     <section class="panel shots-panel">
       <header class="panel-head"><h2>Screenshots</h2></header>
