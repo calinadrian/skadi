@@ -20,7 +20,7 @@ import { LocalSearxng } from './searxng.mjs';
 import { listDirectory, readProjectFile, findFiles } from './files.mjs';
 import { TaskManager } from './tasks.mjs';
 import { gitStatus, gitDiff } from './git.mjs';
-import { SkillStore, skillTools, skillCatalogue } from './skills.mjs';
+import { SkillStore, skillTools, skillCatalogue, seedBundledSkills } from './skills.mjs';
 import { MemoryStore, memoryTools } from './memory.mjs';
 import { SessionStore } from './sessions.mjs';
 import { topicTitle, modelTitle } from './titles.mjs';
@@ -40,6 +40,7 @@ import { recordEdit, applyOne, applyAll, changeSummary, publicHistory } from './
 // an endpoint its own server has never heard of.
 const STARTED_AT = Date.now();
 import { Agent, buildSystemPrompt } from './agent.mjs';
+import { applyPlanAction, normalisePlan, planPrompt } from './plans.mjs';
 import { resolveContextTokens, estimateTokens } from './compaction.mjs';
 import {
   loadProviders, saveProviders, saveSecret, providerStatus, resolveProvider, listModels, modelLimits,
@@ -292,6 +293,7 @@ export class Skadi {
   constructor() {
     this.config = loadConfig();
     this.settings = loadSettings();
+    seedBundledSkills(join(ROOT, 'defaults', 'skills'), join(ROOT, 'skills'));
     // One llama-server per loaded model, keyed by the profile it was launched
     // from, each on its own port. Load as many as the card holds.
     this.instances = new Map();
@@ -1881,6 +1883,7 @@ export class Skadi {
       // turn has stamped its session id onto ctx (see chat below).
       startBackground: ({ command, shell }) =>
         this.tasks.start({ command, shell, sessionId: ctx.sessionId ?? null, cwd: this.workspace }),
+      updatePlan: (request) => this.updateSessionPlan(ctx.sessionId, request, { source: 'agent' }),
     };
     // Filled in once the agent exists: the screenshot hook belongs to *this*
     // turn's agent, not to whichever turn happens to be running.
@@ -1945,7 +1948,7 @@ export class Skadi {
     // flight the UI has to know which chat a token belongs to before it can
     // render it. Token and reasoning deltas arrive as bare strings, so they
     // are wrapped rather than spread.
-    for (const event of ['round', 'token', 'reasoning', 'tool_call', 'tool_result', 'approval_request', 'retry', 'steer', 'stats', 'done', 'loop_detected', 'loop_review_error', 'compact_start', 'compact_progress', 'compact_end']) {
+    for (const event of ['round', 'progress', 'token', 'reasoning', 'tool_call', 'tool_result', 'approval_request', 'retry', 'steer', 'stats', 'done', 'loop_detected', 'loop_review_error', 'compact_start', 'compact_progress', 'compact_end']) {
       agent.on(event, (data) => {
         const sessionId = agent.toolCtx?.sessionId ?? null;
         const payload = typeof data === 'string' ? { text: data } : { ...(data ?? {}) };
@@ -1967,6 +1970,7 @@ export class Skadi {
     // The turn stamps per-session tool context here; tool closures read it
     // lazily so background tasks and edit records land in the right session.
     agent.toolCtx = ctx;
+    agent.liveGuidance = () => planPrompt(this.liveSession(ctx.sessionId)?.plan);
     self = agent;
     return agent;
   }
@@ -2331,6 +2335,26 @@ export class Skadi {
     await fn(s);
     await this.sessions.save(s);
     return s;
+  }
+
+  /** Apply one plan action to the in-flight session object (when present). */
+  async updateSessionPlan(id, request, { source = 'user' } = {}) {
+    if (!id) throw new Error('session id required');
+    const session = await this.mutateSession(id, (target) => {
+      target.plan = applyPlanAction(target.plan, request, { source });
+    });
+    // Plan edits are user-visible state, so persist immediately even during a
+    // running turn rather than waiting for the next transcript append.
+    await this.sessions.save(session);
+    const plan = normalisePlan(session.plan);
+    this.broadcast('session_plan', { sessionId: id, plan, source });
+    if (source === 'user') {
+      const turn = this.turns.get(id);
+      if (turn?.agent?.running) {
+        turn.agent.steer(`[Execution plan edited by the user; revision ${plan.revision}. Re-read the authoritative live plan at the next step and follow it. Do not recreate skipped or deleted items.]`);
+      }
+    }
+    return plan;
   }
 
   /** A background task finished: land its result in the session transcript. */
@@ -3030,6 +3054,11 @@ export class Skadi {
           const session = await this.sessions.update(id, patch || {});
           return json(200, { session });
         }
+        case 'POST session/plan': {
+          const { id, ...request } = await readBody();
+          if (!id) return json(400, { error: 'id required' });
+          return json(200, { plan: await this.updateSessionPlan(id, request, { source: 'user' }) });
+        }
         case 'POST group/create': {
           const { name } = await readBody();
           const group = await this.sessions.createGroup(name, loadProjects().active);
@@ -3182,8 +3211,9 @@ export class Skadi {
             // Keep the switch and path as separate argv entries. Node will
             // quote the path when needed, while Explorer still receives its
             // required comma delimiter as `/select, <path>`.
+            // No windowsHide here: CREATE_NO_WINDOW starts the process but
+            // suppresses the new Explorer window, so the click appears dead.
             const child = spawn('explorer.exe', ['/select,', file], {
-              windowsHide: true,
               detached: true,
               stdio: 'ignore',
             });

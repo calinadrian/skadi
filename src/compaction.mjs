@@ -227,11 +227,14 @@ export function truncateForSummary(head, { contextTokens, reserve, summaryMaxTok
 export const SUMMARY_PROMPT = `You are compacting a coding session so the work can continue in a smaller context window. Summarise ONLY the conversation above; the most recent messages are preserved verbatim elsewhere and are not shown here.
 
 Write a detailed continuation summary covering:
-- The user's goal and what has been done so far
+- Under a heading exactly named "## User Goal": the user's original request, restated in full
+- What has been done so far, counting only completed file edits as implementation progress
 - Key decisions and why they were made
 - Files created or modified and their current state (concrete paths)
 - Commands or tests run and their outcomes, including error messages that still matter
 - What remains to do next
+
+Do not record opinions about the progress ledger or tell the next model to ignore it; it is regenerated every turn.
 
 Be concrete and omit small talk. A future model must be able to pick up the work from your summary alone.`;
 

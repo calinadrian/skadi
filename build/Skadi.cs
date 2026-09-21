@@ -59,12 +59,15 @@ class ShellForm : Form
     readonly string url;
     readonly Process server;
     readonly bool ownsServer;
+    readonly EventWaitHandle activateEvent;
+    readonly System.Windows.Forms.Timer activateTimer = new System.Windows.Forms.Timer();
 
-    public ShellForm(string url, Process server, bool ownsServer, string appName)
+    public ShellForm(string url, Process server, bool ownsServer, string appName, EventWaitHandle activateEvent)
     {
         this.url = url;
         this.server = server;
         this.ownsServer = ownsServer;
+        this.activateEvent = activateEvent;
 
         Text = appName;
         // Sizable, not None: we want the native resize borders and the shadow.
@@ -88,6 +91,21 @@ class ShellForm : Form
 
         Load += async (s, e) => await Start();
         FormClosed += (s, e) => { if (ownsServer) Shell.KillTree(server); };
+
+        // A later Skadi.exe launch signals this event instead of creating a
+        // second shell. Polling on the UI thread keeps all window operations
+        // on their owning thread, and a signal sent during startup remains set
+        // until this window is ready to consume it.
+        activateTimer.Interval = 200;
+        activateTimer.Tick += (s, e) =>
+        {
+            if (this.activateEvent == null || !this.activateEvent.WaitOne(0)) return;
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            Show();
+            BringToFront();
+            Activate();
+        };
+        activateTimer.Start();
     }
 
     async Task Start()
@@ -212,6 +230,55 @@ class ShellForm : Form
             return;
         }
         base.WndProc(ref m);
+    }
+}
+
+// The UI server is single-instance too, but that alone is not enough: the old
+// launch path reused the server and still created a fresh ShellForm every time.
+// This gate is scoped to the installation and UI port. A second launch signals
+// the first window to restore/focus itself and exits before touching the server.
+static class SingleInstance
+{
+    static Mutex mutex;
+    static EventWaitHandle activateEvent;
+
+    static string Token(string projectDir, int port)
+    {
+        string value = Path.GetFullPath(projectDir).TrimEnd('\\', '/').ToLowerInvariant() + "|" + port;
+        ulong hash = 14695981039346656037UL;
+        foreach (char c in value)
+        {
+            hash ^= c;
+            hash *= 1099511628211UL;
+        }
+        return hash.ToString("x16");
+    }
+
+    public static bool TryAcquire(string projectDir, int port, out EventWaitHandle signal)
+    {
+        string token = Token(projectDir, port);
+        mutex = new Mutex(false, @"Local\Skadi.Shell." + token);
+
+        bool acquired = false;
+        try { acquired = mutex.WaitOne(0); }
+        catch (AbandonedMutexException) { acquired = true; }
+
+        if (!acquired)
+        {
+            try
+            {
+                using (var existing = EventWaitHandle.OpenExisting(@"Local\Skadi.Activate." + token))
+                    existing.Set();
+            }
+            catch (WaitHandleCannotBeOpenedException) { }
+            signal = null;
+            return false;
+        }
+
+        activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset,
+            @"Local\Skadi.Activate." + token);
+        signal = activateEvent;
+        return true;
     }
 }
 
@@ -546,6 +613,9 @@ static class Shell
             break;
         }
 
+        EventWaitHandle activateEvent;
+        if (!SingleInstance.TryAcquire(projectDir, port, out activateEvent)) return 0;
+
         if (IsServing(port) && !IsSameInstallation(port, projectDir))
         {
             Fail("Port " + port + " is already serving another or older Skadi installation.\n\n" +
@@ -635,7 +705,7 @@ static class Shell
             try
             {
                 string appName = "Skadi";
-                Application.Run(new ShellForm(url, child, weStartedIt, appName));
+                Application.Run(new ShellForm(url, child, weStartedIt, appName, activateEvent));
                 return 0;
             }
             catch (Exception ex)

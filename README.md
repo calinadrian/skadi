@@ -108,6 +108,9 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
   button in the composer enables or disables search separately for each chat.
 - **Permission modes** from *Manual* to *Auto*, so you decide what runs unasked.
 - **Undo and redo** every file a chat wrote — one file, or the whole chat.
+- **A live execution plan** for substantial work. The agent keeps one step active
+  while you can edit, insert, skip, delete, restore or reorder steps from the
+  workspace without stopping the turn.
 - **An embedded browser** per chat, driven by you and the agent together; the agent
   can screenshot, click, type and read the console to check its own work.
 - **Skills and memory** the agent can read and write, kept as plain Markdown.

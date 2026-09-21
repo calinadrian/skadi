@@ -553,6 +553,47 @@ export function buildTools(ctx) {
     },
   };
 
+  // Only parent chat agents receive this callback. Read-only subagents use the
+  // same filesystem tools but must not own or rewrite the user's live plan.
+  if (ctx.updatePlan) {
+    tools.update_plan = {
+      schema: {
+        description:
+          'Create and maintain the chat execution plan. For medium or hard implementation work, set a concise 3-8 step outcome plan before broad work, then mark a step working/done/blocked/review as progress changes. The user can edit, reorder, skip, or delete items at any time; never recreate skipped/deleted work or replace a user-edited plan.',
+        parameters: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['set', 'add', 'edit', 'status', 'move', 'remove', 'restore'] },
+            items: {
+              type: 'array',
+              description: 'Initial ordered steps for action=set.',
+              items: {
+                type: 'object',
+                properties: {
+                  text: { type: 'string' },
+                  status: { type: 'string', enum: ['queued', 'working', 'blocked', 'review', 'done', 'skipped'] },
+                  note: { type: 'string' },
+                  required: { type: 'boolean' },
+                },
+                required: ['text'],
+              },
+            },
+            itemId: { type: 'string', description: 'Target item id for edit/status/move/remove/restore.' },
+            text: { type: 'string', description: 'Short outcome-focused step text for add/edit.' },
+            status: { type: 'string', enum: ['queued', 'working', 'blocked', 'review', 'done', 'skipped'] },
+            note: { type: 'string', description: 'Optional concise progress evidence or blocker.' },
+            required: { type: 'boolean' },
+            index: { type: 'integer', description: 'Zero-based insertion or destination position.' },
+          },
+          required: ['action'],
+        },
+      },
+      async run(args) {
+        return JSON.stringify(await ctx.updatePlan(args), null, 2);
+      },
+    };
+  }
+
   return tools;
 }
 

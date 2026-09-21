@@ -385,6 +385,21 @@ while the summary streams. Tune it in
 }
 ```
 
+## Live execution plans
+
+For medium and large implementation turns, the main agent publishes a short
+execution plan before it starts changing files. The **Plan** workspace tab shows
+which step is working, what is queued, blocked, ready for review, done or skipped.
+The agent updates the same plan through the `update_plan` tool as work advances.
+
+The plan is also a control surface for the user. Step text can be edited inline;
+steps can be inserted, reordered with drag or keyboard-accessible arrow buttons,
+skipped through the status picker, or deleted and restored with **Undo**. User
+changes are persisted immediately and steered into a running turn at the next
+safe model boundary. Once a user has changed a plan, a later agent update cannot
+silently replace it, rewrite user-authored step text, or revive a skipped step.
+Only one step may be marked **Working** at a time.
+
 ## Subagents and loop recovery
 
 Before a parent turn begins, a small no-reasoning router decides whether a

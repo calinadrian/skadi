@@ -5,8 +5,12 @@ import {
   actionFingerprint,
   createProgressLedger,
   implementationRequest,
+  incompleteCompletion,
+  objectiveFromMessages,
   observeToolRound,
   progressLedgerText,
+  taskBudgets,
+  taskComplexity,
 } from '../src/progress-ledger.mjs';
 
 const call = (name, args) => ({ function: { name, arguments: JSON.stringify(args) } });
@@ -49,5 +53,96 @@ test('implementation phases advance from discovery through edit and verification
   assert.equal(ledger.phase, 'verify');
   observeToolRound(ledger, [call('run_command', { command: 'npm test' })], [{ ok: true, content: 'pass' }]);
   assert.equal(ledger.phase, 'complete');
-  assert.match(progressLedgerText(ledger), /Material edits: 1; post-edit verification actions: 1/);
+  assert.match(progressLedgerText(ledger), /material deliverable edits: 1; valid post-edit verification actions: 1/i);
+});
+
+test('task sizing keeps a small fix tight and gives a researched website room', () => {
+  assert.equal(taskComplexity('Fix the Open location button.'), 'easy');
+  assert.equal(taskComplexity('Add a settings panel and verify it.'), 'medium');
+  assert.equal(
+    taskComplexity('Build a TFT website from scratch using current patch data, real icons, and multiple pages.'),
+    'hard',
+  );
+  assert.deepEqual(taskBudgets({ maxToolRounds: 8, maxImplementationDiscoveryRounds: 4 }, 'easy'), {
+    maxRounds: 8,
+    discoveryRounds: 4,
+  });
+  assert.deepEqual(taskBudgets({ maxToolRounds: 8, maxImplementationDiscoveryRounds: 4 }, 'medium'), {
+    maxRounds: 16,
+    discoveryRounds: 6,
+  });
+  assert.deepEqual(taskBudgets({ maxToolRounds: 8, maxImplementationDiscoveryRounds: 4 }, 'hard'), {
+    maxRounds: 30,
+    discoveryRounds: 8,
+  });
+});
+
+test('continuation turns retain the substantive implementation objective', () => {
+  assert.match(objectiveFromMessages([
+    { role: 'user', content: 'Build a TFT website with current comps, real icons, and multiple pages.' },
+    { role: 'assistant', content: 'Working.' },
+    { role: 'user', content: [{ type: 'image', data: 'x' }, { type: 'text', text: 'Screenshot of the current page.' }] },
+    { role: 'user', content: 'continue' },
+  ]), /Build a TFT website/);
+});
+
+test('hard-task completion gaps are detected instead of presented as success', () => {
+  assert.equal(incompleteCompletion('One honest gap: the actual meta content is still empty.'), true);
+  assert.equal(incompleteCompletion("I hit a blocker and can't responsibly build this before I have the data."), true);
+  assert.equal(incompleteCompletion('Implemented the requested data and verified both pages.'), false);
+});
+
+test('placeholder website data remains an explicit completion gap', () => {
+  const ledger = createProgressLedger('Build a current TFT website with real comps and icons.');
+  observeToolRound(ledger, [call('write_file', {
+    path: 'js/data.js',
+    content: 'window.META = { openers: [], comps: [] };',
+  })], [{ ok: true, content: 'Created js/data.js' }]);
+  observeToolRound(ledger, [call('browser_read', {})], [{
+    ok: true,
+    content: 'Meta data for patch 18.2 will appear here.',
+  }]);
+  assert.equal(ledger.phase, 'implement');
+  assert.match(progressLedgerText(ledger), /js\/data\.js: placeholder/i);
+  assert.match(progressLedgerText(ledger), /rendered output.*placeholder/i);
+});
+
+test('research downloads and dev-server commands do not count as verification', () => {
+  const ledger = createProgressLedger('Build a current TFT website with real comps and icons.');
+  observeToolRound(ledger, [call('write_file', { path: 'index.html', content: '<h1>TFT</h1>' })], [{ ok: true, content: 'Created' }]);
+  observeToolRound(ledger, [call('run_command', { command: "Invoke-WebRequest 'https://example.com/data'" })], [{ ok: true, content: 'downloaded' }]);
+  observeToolRound(ledger, [call('run_command', { command: 'node server.js' })], [{ ok: true, content: 'started' }]);
+  assert.equal(ledger.verifications, 0);
+  observeToolRound(ledger, [call('run_command', { command: 'node --test tests/site.test.mjs' })], [{ ok: true, content: 'pass' }]);
+  assert.equal(ledger.verifications, 1);
+});
+
+test('debug check files do not satisfy the deliverable edit requirement', () => {
+  const ledger = createProgressLedger('Build a current TFT website with real comps and icons.');
+  observeToolRound(ledger, [call('write_file', {
+    path: 'tft/_check.html',
+    content: '<title>image matrix</title>',
+  })], [{ ok: true, content: 'Created tft/_check.html' }]);
+  assert.equal(ledger.mutations, 1);
+  assert.equal(ledger.materialMutations, 0);
+  assert.equal(ledger.firstMaterialMutationRound, 0);
+  assert.equal(ledger.phase, 'locate');
+});
+
+test('a compacted transcript still yields the implementation objective', () => {
+  const objective = objectiveFromMessages([
+    { role: 'assistant', content: ['[Compacted context - 2026-09-20 20:16]', '', '# Continuation Summary', '', '## User Goal', 'Build and fix the TFT site so every image loads.', '', '## Status', 'research done'].join(String.fromCharCode(10)) },
+    { role: 'user', content: 'continue' },
+  ]);
+  assert.match(objective, /Build and fix the TFT site/);
+  assert.equal(createProgressLedger(objective).implementation, true);
+});
+
+test('the ledger text says an unedited implementation is not complete', () => {
+  const ledger = createProgressLedger('Fix the broken images on the site.');
+  assert.doesNotMatch(progressLedgerText(ledger), /NOT complete/);
+  ledger.rounds = 3;
+  assert.match(progressLedgerText(ledger), /NOT complete: no deliverable file has been edited/);
+  ledger.materialMutations = 1;
+  assert.doesNotMatch(progressLedgerText(ledger), /NOT complete/);
 });

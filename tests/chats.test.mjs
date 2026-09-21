@@ -502,3 +502,16 @@ test('a new chat is named for its topic at once, and the model is asked to do be
     assert.equal(h.titled.length, 1);
   });
 });
+
+test('running chats show their working mark beside the title without hiding unread state', async () => {
+  const [js, css] = await Promise.all([
+    readFile(new URL('../ui/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../ui/style.css', import.meta.url), 'utf8'),
+  ]);
+  assert.match(js, /if \(session\.unread\) row\.append\(el\('span', 'unread-dot'/);
+  assert.match(js, /top\.append\(mark\);\s*}\s*top\.append\(el\('span', 'chat-title'/);
+  assert.match(js, /mark\.setAttribute\('aria-label', 'Working'\)/);
+  assert.match(js, /mark\.title = 'Working'/);
+  assert.match(css, /\.chat-running-mark\s*{/);
+  assert.match(css, /\.chat-row\.running \.chat-sub/);
+});

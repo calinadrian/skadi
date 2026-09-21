@@ -761,6 +761,46 @@ export function browserTools(getBrowser, { onScreenshot, vision = () => false } 
       },
     },
 
+    browser_extract: {
+      schema: {
+        description:
+          'Extract structured research data from the current dynamic page: headings, links, images with nearby card text, and embedded JSON. Use this when visible text alone does not expose lists, comps, products, or other data rendered by JavaScript.',
+        parameters: {
+          type: 'object',
+          properties: {
+            limit: { type: 'integer', description: 'Maximum rows per category, default 80 and maximum 200.' },
+          },
+        },
+      },
+      async run({ limit }) {
+        const browser = await getBrowser();
+        const cap = Math.min(200, Math.max(10, Number(limit) || 80));
+        const value = await browser.evaluate(`(() => {
+          const cap = ${cap};
+          const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+          const nearby = (el) => {
+            let node = el;
+            for (let i = 0; node && i < 5; i++, node = node.parentElement) {
+              const text = clean(node.innerText || node.textContent);
+              if (text.length >= 3 && text.length <= 500) return text;
+            }
+            return '';
+          };
+          const rows = (selector, map) => [...document.querySelectorAll(selector)].slice(0, cap).map(map);
+          return {
+            title: document.title,
+            url: location.href,
+            headings: rows('h1,h2,h3,h4', el => clean(el.innerText || el.textContent)).filter(Boolean),
+            links: rows('a[href]', el => ({ text: clean(el.innerText || el.textContent), href: el.href })),
+            images: rows('img', el => ({ alt: clean(el.alt), title: clean(el.title), src: el.currentSrc || el.src, nearby: nearby(el) })),
+            embeddedJson: rows('script[type="application/json"],script#__NEXT_DATA__', el => clean(el.textContent).slice(0, 6000)).filter(Boolean),
+          };
+        })()`);
+        const text = JSON.stringify(value, null, 2) ?? '{}';
+        return text.length > 30000 ? `${text.slice(0, 30000)}\n... [truncated]` : text;
+      },
+    },
+
     browser_elements: {
       schema: {
         description:

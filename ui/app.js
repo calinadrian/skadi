@@ -94,6 +94,9 @@ const state = {
   // sessionId -> the approval its turn is waiting on, shown when that chat is
   // the one open.
   approvals: new Map(),
+  // Last completion signal per chat. Incomplete ceilings must never be styled
+  // as successful completion just because the agent stopped running.
+  outcomes: new Map(),
   // Null until the event stream has opened once; false once it drops.
   online: null,
   browserDevice: 'desktop',
@@ -115,6 +118,7 @@ const state = {
   browserStream: null,
   tasks: [],
   undo: [], // this session's file-edit undo entries {callId, path, added, removed, at}
+  plan: { version: 1, revision: 0, updatedAt: 0, userEdited: false, items: [], deleted: [] },
 };
 
 // The default provider: where a new chat starts, and what Settings edits.
@@ -305,6 +309,7 @@ function renderMode() {
   sel.value = currentMode();
   const active = MODES.find((m) => m.value === sel.value);
   sel.title = active ? `Permission mode — ${active.hint}` : 'Permission mode';
+  renderEmptyReadiness();
 }
 
 async function setMode(value, { confirmed = false } = {}) {
@@ -333,15 +338,51 @@ function cycleMode() {
 // Updated on every agent SSE event; hidden when idle.
 // ============================================================================
 
+let activeTurnStartedAt = 0;
+let activeTurnText = '';
+
+function renderTurnStatus() {
+  const card = $('turnStatus');
+  if (!card) return;
+  const busy = isBusy();
+  card.hidden = !busy;
+  if (!busy) return;
+  activeTurnStartedAt ||= Date.now();
+  $('turnStatusText').textContent = activeTurnText || 'Working…';
+  $('turnElapsed').textContent = fmtDur(Date.now() - activeTurnStartedAt);
+}
+
+function renderOutcomeBar() {
+  const bar = $('outcomeBar');
+  if (!bar) return;
+  const answers = [...document.querySelectorAll('#messages .msg.assistant .body')];
+  const hasAnswer = answers.some((node) => node.textContent.trim());
+  const outcome = state.outcomes.get(state.sessionId);
+  const lastAnswer = answers.at(-1)?.textContent || '';
+  const inferredIncomplete = /\b(?:task is incomplete|task paused|stopped at the adaptive|paused after the \d+(?:\.\d+)?-minute turn safety limit)\b/i.test(lastAnswer);
+  const incomplete = Boolean(outcome?.incomplete || outcome?.truncated || inferredIncomplete);
+  const title = $('outcomeTitle');
+  const hint = $('outcomeHint');
+  if (title) title.textContent = incomplete ? 'Task paused — incomplete' : 'Task finished';
+  if (hint) hint.textContent = incomplete
+    ? 'Review the saved progress and continue from the open gaps'
+    : 'Inspect the result before continuing';
+  bar.classList.toggle('incomplete', incomplete);
+  bar.hidden = isBusy() || !state.sessionId || !hasAnswer;
+}
+
 function setActivity(text) {
   const box = $('activity');
   if (!box) return;
   if (!text) {
     box.hidden = true;
+    renderTurnStatus();
     return;
   }
   box.hidden = false;
   $('activityText').textContent = text;
+  activeTurnText = text;
+  renderTurnStatus();
 }
 
 async function refreshBranch() {
@@ -717,6 +758,7 @@ function toolLabel(name, args) {
     case 'browser_type': case 'browser_fill': return { verb: 'Typed in the page', target: clipText(String(args?.selector ?? ''), 50) };
     case 'browser_scroll': return { verb: 'Scrolled the page' };
     case 'browser_read': case 'browser_elements': return { verb: 'Read the page' };
+    case 'browser_extract': return { verb: 'Extracted page data' };
     case 'browser_console': return { verb: 'Read the browser console' };
     case 'browser_eval': return { verb: 'Ran page script' };
     case 'web_search': return { verb: 'Searched the web', target: args?.query || '' };
@@ -1442,6 +1484,187 @@ function toast(text) {
   toastTimer = setTimeout(() => { t.hidden = true; }, 6000);
 }
 
+// ============================================================================
+// Per-chat execution plan. The server owns ordering and revision numbers; this
+// renderer replaces its local copy after every action, avoiding merge races
+// between the user and an agent that updates progress at the same time.
+// ============================================================================
+
+const PLAN_STATUS = [
+  ['queued', 'Queued'],
+  ['working', 'Working'],
+  ['blocked', 'Blocked'],
+  ['review', 'Needs review'],
+  ['done', 'Done'],
+  ['skipped', 'Skipped'],
+];
+
+function emptyPlan() {
+  return { version: 1, revision: 0, updatedAt: 0, userEdited: false, items: [], deleted: [] };
+}
+
+function acceptPlan(plan, { announce = false } = {}) {
+  state.plan = plan && Array.isArray(plan.items) ? plan : emptyPlan();
+  renderPlan();
+  if (announce) {
+    const current = state.plan.items.find((item) => item.status === 'working');
+    $('planLive').textContent = current ? `Plan updated. Working on ${current.text}` : 'Plan updated.';
+  }
+}
+
+async function planAction(action, extra = {}) {
+  if (!state.sessionId) throw new Error('Send the first message before editing its plan.');
+  const { plan } = await api('session/plan', { id: state.sessionId, action, ...extra });
+  acceptPlan(plan);
+  return plan;
+}
+
+function planIconButton(name, label, onClick, disabled = false) {
+  const button = el('button', 'icon-btn plan-action');
+  button.type = 'button';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.disabled = disabled;
+  const glyph = icon(name);
+  glyph.setAttribute('aria-hidden', 'true');
+  button.append(glyph);
+  button.onclick = guard(onClick);
+  return button;
+}
+
+let draggedPlanItem = null;
+
+function renderPlan() {
+  const plan = state.plan || emptyPlan();
+  const list = $('planList');
+  if (!list) return;
+  const open = plan.items.filter((item) => !['done', 'skipped'].includes(item.status));
+  const done = plan.items.filter((item) => item.status === 'done').length;
+  const working = plan.items.find((item) => item.status === 'working');
+  $('planSummary').textContent = plan.items.length
+    ? `${done} of ${plan.items.length} complete${open.length ? ` · ${open.length} open` : ''}`
+    : 'The agent will create a plan for substantial work.';
+  $('planAdd').disabled = !state.sessionId;
+  $('planAdd').title = state.sessionId ? 'Insert a new step' : 'Send the first message before adding steps';
+
+  const tabCount = $('planTabCount');
+  tabCount.hidden = open.length === 0;
+  tabCount.textContent = String(open.length);
+  const planTab = tabCount.closest('[data-tool]');
+  if (planTab) planTab.setAttribute('aria-label', open.length ? `Plan, ${open.length} open steps` : 'Plan');
+
+  if (!plan.items.length) {
+    list.replaceChildren();
+    const empty = el('li', 'plan-empty');
+    empty.append(
+      icon('list'),
+      el('strong', null, state.sessionId ? 'No plan yet' : 'Start a chat first'),
+      el('span', null, state.sessionId
+        ? 'For medium and hard work, the agent creates a plan before broad exploration. You can also add the first step.'
+        : 'A plan is saved with each chat and appears here as work begins.'),
+    );
+    list.append(empty);
+  } else {
+    const rows = plan.items.map((item, index) => {
+      const row = el('li', `plan-item status-${item.status}`);
+      row.dataset.planId = item.id;
+      const grip = el('span', 'plan-grip');
+      grip.title = 'Drag to reorder';
+      grip.setAttribute('aria-hidden', 'true');
+      grip.draggable = true;
+      grip.append(icon('list'));
+      grip.addEventListener('dragstart', (event) => {
+        draggedPlanItem = item.id;
+        row.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', item.id);
+      });
+      grip.addEventListener('dragend', () => {
+        draggedPlanItem = null;
+        row.classList.remove('dragging');
+      });
+      row.addEventListener('dragover', (event) => {
+        if (!draggedPlanItem || draggedPlanItem === item.id) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        row.classList.add('drop-target');
+      });
+      row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+      row.addEventListener('drop', guard(async (event) => {
+        event.preventDefault();
+        row.classList.remove('drop-target');
+        if (!draggedPlanItem || draggedPlanItem === item.id) return;
+        await planAction('move', { itemId: draggedPlanItem, index });
+      }));
+
+      const body = el('div', 'plan-item-body');
+      const input = el('input', 'plan-text');
+      input.type = 'text';
+      input.value = item.text;
+      input.maxLength = 240;
+      input.setAttribute('aria-label', `Step ${index + 1}`);
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
+        if (event.key === 'Escape') { input.value = item.text; input.blur(); }
+      });
+      input.addEventListener('blur', guard(async () => {
+        const text = input.value.trim();
+        if (!text) { input.value = item.text; return; }
+        if (text !== item.text) await planAction('edit', { itemId: item.id, text });
+      }));
+
+      const meta = el('div', 'plan-item-meta');
+      const status = el('select', 'plan-status');
+      status.setAttribute('aria-label', `Status for ${item.text}`);
+      for (const [value, label] of PLAN_STATUS) {
+        const option = el('option', null, label);
+        option.value = value;
+        option.selected = item.status === value;
+        status.append(option);
+      }
+      status.onchange = guard(() => planAction('status', { itemId: item.id, status: status.value }));
+      meta.append(status);
+      if (item.note) {
+        const note = el('span', 'plan-note', item.note);
+        note.title = item.note;
+        meta.append(note);
+      }
+      body.append(input, meta);
+
+      const actions = el('div', 'plan-actions');
+      const up = planIconButton('chevron', `Move ${item.text} up`, () => planAction('move', { itemId: item.id, index: index - 1 }), index === 0);
+      up.classList.add('move-up');
+      const down = planIconButton('chevron', `Move ${item.text} down`, () => planAction('move', { itemId: item.id, index: index + 1 }), index === plan.items.length - 1);
+      const remove = planIconButton('trash', `Delete ${item.text}`, () => planAction('remove', { itemId: item.id }));
+      remove.classList.add('danger-icon');
+      actions.append(up, down, remove);
+      row.append(grip, body, actions);
+      return row;
+    });
+    list.replaceChildren(...rows);
+  }
+
+  const deleted = plan.deleted?.[0];
+  $('planUndo').hidden = !deleted;
+  if (deleted) $('planUndoText').textContent = `Deleted “${deleted.item.text}”.`;
+  $('planLive').textContent = working ? `Working: ${working.text}` : '';
+}
+
+function wirePlan() {
+  $('planAdd').onclick = guard(async () => {
+    const before = new Set(state.plan.items.map((item) => item.id));
+    const plan = await planAction('add', { text: 'New step' });
+    const added = plan.items.find((item) => !before.has(item.id));
+    requestAnimationFrame(() => {
+      const input = document.querySelector(`[data-plan-id="${CSS.escape(added?.id || '')}"] .plan-text`);
+      input?.focus();
+      input?.select();
+    });
+  });
+  $('planUndoButton').onclick = guard(() => planAction('restore', {}));
+  renderPlan();
+}
+
 function fmtDur(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
@@ -1558,6 +1781,7 @@ function wireTasks() {
     for (const n of document.querySelectorAll('[data-running-since]')) {
       n.textContent = fmtDur(now - Number(n.dataset.runningSince));
     }
+    if (isBusy()) renderTurnStatus();
   }, 1000);
 }
 
@@ -2842,8 +3066,7 @@ function renderInstances() {
   renderLoadArea();
   renderRestartButton();
 
-  const empty = $('emptyState');
-  if (empty && (live.length || !isLocal())) empty.querySelector('h3').textContent = 'What should we build?';
+  renderEmptyReadiness();
   renderChatPicker();
 }
 
@@ -3119,9 +3342,12 @@ const FIELDS = [
 const SKADI_FIELDS = [
   { key: 'loopDetection', label: 'Semantic loop detection', type: 'bool' },
   { key: 'loopReviewEffort', label: 'Loop supervisor reasoning', type: 'select', options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
+  { key: 'loopReviewEvery', label: 'Semantic review cadence', type: 'range', min: 1, max: 10, step: 1, fmt: (v) => `every ${v} rounds` },
+  { key: 'maxImplementationDiscoveryRounds', label: 'Discovery budget', type: 'range', min: 1, max: 20, step: 1 },
   { key: 'autoSubagents', label: 'Automatic research subagents', type: 'bool' },
   { key: 'autoSubagentReasoning', label: 'Subagent reasoning', type: 'select', options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
-  { key: 'maxToolRounds', label: 'Emergency tool ceiling', type: 'range', min: 0, max: 60, step: 1, fmt: (v) => (Number(v) === 0 ? 'off' : String(v)) },
+  { key: 'maxToolRounds', label: 'Easy-task tool ceiling', type: 'range', min: 0, max: 60, step: 1, fmt: (v) => (Number(v) === 0 ? 'off' : String(v)) },
+  { key: 'maxTurnMinutes', label: 'Turn safety limit (min)', type: 'number' },
   { key: 'commandTimeoutSec', label: 'Command timeout (s)', type: 'number' },
   { key: 'approveWrites', label: 'Confirm file writes', type: 'bool' },
   { key: 'approveCommands', label: 'Confirm shell commands', type: 'bool' },
@@ -3578,13 +3804,19 @@ function chatRow(session) {
 
   // A chat with a turn in flight pulses, whether or not it is the open one --
   // several can run at once, so the rail is where you see what is working.
-  if (running) row.append(el('span', 'unread-dot running-dot', ''));
-  else if (session.unread) row.append(el('span', 'unread-dot', ''));
+  if (session.unread) row.append(el('span', 'unread-dot', ''));
   else row.append(el('span', 'unread-dot placeholder', ''));
 
   const main = el('div', 'chat-main');
   const top = el('div', 'chat-top');
   if (session.pinned) top.append(icon('pin'));
+  if (running) {
+    const mark = el('span', 'chat-running-mark');
+    mark.setAttribute('role', 'img');
+    mark.setAttribute('aria-label', 'Working');
+    mark.title = 'Working';
+    top.append(mark);
+  }
   top.append(el('span', 'chat-title', redactCredentials(session.title || 'Untitled')));
   // The rail lists every chat, so a row has to say where it lives. Only the
   // ones filed elsewhere need to: naming the project on all of them would
@@ -3702,19 +3934,6 @@ function renderChatList() {
     box.append(section);
   }
 
-  const recent = list.slice(0, 8);
-  if (recent.length) {
-    const section = el('section', 'recent-chat-section');
-    section.append(el('div', 'chat-section-title rail-section-title', 'Recents'));
-    const rows = el('div', 'recent-chat-rows');
-    for (const session of recent) {
-      const row = chatRow(session);
-      row.classList.add('recent-row');
-      rows.append(row);
-    }
-    section.append(rows);
-    box.append(section);
-  }
 }
 
 function startInlineRename(row, session) {
@@ -4101,6 +4320,7 @@ async function openSession(id) {
   // The bar belongs to the chat, so it is replaced with it rather than
   // left showing the last chat's figures.
   state.changes = session.changes || null;
+  acceptPlan(session.plan);
   renderChatChanges();
   // The browser belongs to the chat: show this one's, not the last one's.
   syncBrowserPane();
@@ -4165,6 +4385,7 @@ async function openSession(id) {
   // leaving the answer to reappear only once the turn ends.
   replayLive(id);
   syncBusy();
+  renderOutcomeBar();
   scrollDown(true);
   // The rail is a nicety here; the transcript is already on screen, and a
   // failed refresh must not read as a failure to open the chat.
@@ -4283,6 +4504,13 @@ async function openMemory(name) {
  */
 function setBusy(busy) {
   document.body.classList.toggle('generating', busy);
+  if (busy) {
+    activeTurnStartedAt ||= Date.now();
+    activeTurnText ||= 'Starting…';
+  } else {
+    activeTurnStartedAt = 0;
+    activeTurnText = '';
+  }
   // The composer stays live while the model works: a message sent now is a
   // steer -- it joins the running turn instead of waiting for the next one.
   // Compact mid-turn is a 409 (the transcript is moving under it); make that
@@ -4304,6 +4532,8 @@ function setBusy(busy) {
     $('roundInfo').textContent = '';
     setActivity(null);
   }
+  renderTurnStatus();
+  renderOutcomeBar();
 }
 
 /** Is the chat on screen mid-turn? */
@@ -4648,11 +4878,23 @@ function connect() {
     const d = JSON.parse(e.data);
     setRunning(d.sessionId, true);
     if (isPendingView(d.sessionId)) {
-      const label = d.maxRounds > 0 ? `round ${d.round} of ${d.maxRounds}` : `round ${d.round}`;
+      const phase = ({ locate: 'Locating', diagnose: 'Diagnosing', implement: 'Building', verify: 'Verifying', complete: 'Finishing' })[d.phase] || 'Working';
+      const count = d.maxRounds > 0 ? `round ${d.round} of ${d.maxRounds}` : `round ${d.round}`;
+      const label = `${phase} · ${count}`;
       $('roundInfo').textContent = label;
       setActivity(`Working… ${label}`);
     }
     liveEvent('round', d);
+  });
+
+  es.addEventListener('agent_progress', (e) => {
+    const d = JSON.parse(e.data);
+    if (!isPendingView(d.sessionId)) return;
+    const phase = ({ locate: 'Locating', diagnose: 'Diagnosing', implement: 'Building', verify: 'Verifying', complete: 'Finishing' })[d.phase] || 'Working';
+    const facts = [`${d.edits || 0} deliverable edit${d.edits === 1 ? '' : 's'}`];
+    if (d.verifications) facts.push(`${d.verifications} verification${d.verifications === 1 ? '' : 's'}`);
+    if (d.gaps?.length) facts.push(`${d.gaps.length} open gap${d.gaps.length === 1 ? '' : 's'}`);
+    setActivity(`${phase} — ${facts.join(' · ')}`);
   });
 
   // A retry means the provider bounced the request (rate limit, gateway
@@ -4700,7 +4942,9 @@ function connect() {
 
   es.addEventListener('agent_tool_result', (e) => {
     const d = JSON.parse(e.data);
-    if (isPendingView(d.sessionId)) setActivity(d.ok ? 'Working…' : `Tool ${d.name} failed — reading error…`);
+    if (isPendingView(d.sessionId)) setActivity(d.ok
+      ? `Finished ${d.name} — deciding the next step…`
+      : `Recovering from a failed ${d.name} call — reading the error and adapting…`);
     liveEvent('tool_result', d);
   });
 
@@ -4734,7 +4978,9 @@ function connect() {
 
   es.addEventListener('agent_done', async (e) => {
     if (filesPaneActive()) refreshFilesTab().catch(() => {});
-    const finishedSessionId = JSON.parse(e.data || '{}').sessionId ?? null;
+    const outcome = JSON.parse(e.data || '{}');
+    const finishedSessionId = outcome.sessionId ?? null;
+    if (finishedSessionId) state.outcomes.set(finishedSessionId, outcome);
     // The transcript is on disk now, so the live buffer has nothing left to
     // protect; keeping it would replay the turn on top of the saved render.
     resetLive(finishedSessionId);
@@ -4749,6 +4995,7 @@ function connect() {
       state.streaming = null;
       state.compacting = null;
       await openSession(state.sessionId);
+      renderOutcomeBar();
       return;
     }
     await refreshLists();
@@ -4837,6 +5084,11 @@ function connect() {
   });
 
   es.addEventListener('task_update', () => refreshTasks());
+  es.addEventListener('session_plan', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.sessionId !== state.sessionId) return;
+    acceptPlan(data.plan, { announce: true });
+  });
   es.addEventListener('task_done', (e) => {
     const { task } = JSON.parse(e.data);
     refreshTasks();
@@ -5124,7 +5376,7 @@ function wireRailResize() {
 const INSPECTOR_MIN = 280;
 const INSPECTOR_MAX = 760;
 const INSPECTOR_DEFAULT = 380;
-const INSPECTOR_W_KEY = 'skadi.rightW';
+const INSPECTOR_W_KEY = 'skadi.workspaceW';
 const INSPECTOR_OPEN_KEY = 'skadi.inspectorOpen';
 
 const isInspectorOpen = () => !document.querySelector('.layout')?.classList.contains('no-inspector');
@@ -5164,7 +5416,7 @@ function wireInspector() {
   if (!gutter || !rail) return;
 
   try {
-    const savedW = Number(localStorage.getItem(INSPECTOR_W_KEY));
+    const savedW = Number(localStorage.getItem(INSPECTOR_W_KEY) || localStorage.getItem('skadi.rightW'));
     if (savedW >= INSPECTOR_MIN && savedW <= INSPECTOR_MAX) setInspectorWidth(savedW);
     // Keep the workspace calm by default. The activity panel remains one click away.
     setInspectorOpen(localStorage.getItem(INSPECTOR_OPEN_KEY) === '1', { save: false });
@@ -5191,8 +5443,9 @@ function wireInspector() {
 
   gutter.addEventListener('pointermove', (e) => {
     if (!dragging) return;
-    // The dock sits on the right, so dragging its leading edge left grows it.
-    setInspectorWidth(startW - (e.clientX - startX));
+    // The dock sits between Chats and the conversation, so dragging its
+    // trailing edge right grows it.
+    setInspectorWidth(startW + (e.clientX - startX));
   });
 
   const endDrag = () => {
@@ -5209,8 +5462,8 @@ function wireInspector() {
 
   gutter.addEventListener('keydown', (e) => {
     const step = e.shiftKey ? 24 : 8;
-    if (e.key === 'ArrowLeft') { e.preventDefault(); setInspectorWidth(inspectorWidth() + step, { save: true }); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); setInspectorWidth(inspectorWidth() - step, { save: true }); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); setInspectorWidth(inspectorWidth() - step, { save: true }); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); setInspectorWidth(inspectorWidth() + step, { save: true }); }
     else if (e.key === 'Home') { e.preventDefault(); setInspectorWidth(INSPECTOR_MAX, { save: true }); }
     else if (e.key === 'End') { e.preventDefault(); setInspectorWidth(INSPECTOR_MIN, { save: true }); }
   });
@@ -5386,6 +5639,7 @@ function wireToolDock() {
   };
   selectWorkspaceTool = (name) => {
     selectTool(name);
+    if (name === 'plan') renderPlan();
     if (name === 'files') refreshFilesTab();
     if (name === 'review') openChanges();
   };
@@ -5397,6 +5651,10 @@ function wireToolDock() {
   });
 
   $('btnCloseInspector').onclick = () => setInspectorOpen(false);
+  $('outcomeReview').onclick = () => selectWorkspaceTool('review');
+  $('outcomeFiles').onclick = () => selectWorkspaceTool('files');
+  $('outcomeBrowser').onclick = () => setBrowserOpen(true, { focus: true });
+  wirePlan();
   wireFileViewerResize();
 }
 
@@ -5640,9 +5898,12 @@ $('projectSelect').onchange = guard(async () => {
   leaveSession(null);
   state.undo = [];
   state.changes = null;
+  acceptPlan(emptyPlan());
   renderChatChanges();
   resetCtx();
   $('messages').replaceChildren();
+  $('messages').append(createEmptyState());
+  renderOutcomeBar();
   await refreshLists();
   await refreshBranch();
 });
@@ -6624,8 +6885,32 @@ $('btnNewSession').onclick = () => {
 function createEmptyState() {
   const empty = el('div', 'empty');
   empty.id = 'emptyState';
-  empty.append(el('h3', null, 'What should we build?'));
+  empty.append(el('p', 'empty-eyebrow', 'Ready to work'), el('h3', null, 'What should we build?'));
+  const readiness = el('div', 'readiness');
+  readiness.id = 'readiness';
+  readiness.setAttribute('aria-label', 'Chat readiness');
+  empty.append(el('p', 'empty-copy', 'Confirm the workspace below, then describe the outcome you want.'), readiness);
+  queueMicrotask(renderEmptyReadiness);
   return empty;
+}
+
+function renderEmptyReadiness() {
+  const box = $('readiness');
+  if (!box) return;
+  const project = state.projects.find((p) => p.id === state.activeProject);
+  const provider = chatProvider();
+  const modelReady = !provider?.managed || Boolean(chatLocalInstance());
+  const mode = MODES.find((m) => m.value === currentMode());
+  const item = (label, value, ready = true) => {
+    const row = el('div', `readiness-item ${ready ? 'ready' : 'attention'}`);
+    row.append(icon(ready ? 'check' : 'warn'), el('span', null, label), el('strong', null, value));
+    return row;
+  };
+  box.replaceChildren(
+    item('Project', project?.name || 'Choose a project', Boolean(project)),
+    item('Model', modelReady ? (provider?.model || provider?.label || 'Ready') : 'Load a model', modelReady),
+    item('Permissions', mode?.label || 'Ask before changes'),
+  );
 }
 
 $('messages').addEventListener('click', (event) => {
@@ -7801,6 +8086,28 @@ function renderSettingsPane() {
     options: [['none', 'None'], ['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high']],
   });
   addRow(agent, {
+    key: 'loopReviewEvery',
+    type: 'range',
+    min: 1,
+    max: 10,
+    step: 1,
+    fmt: (v) => `every ${v} round${Number(v) === 1 ? '' : 's'}`,
+    icon: 'restart',
+    label: 'Semantic review cadence',
+    desc: 'Exact repeats are caught immediately. The slower model-based reviewer runs at this interval.',
+  });
+  addRow(agent, {
+    key: 'maxImplementationDiscoveryRounds',
+    type: 'range',
+    min: 1,
+    max: 20,
+    step: 1,
+    fmt: (v) => String(v),
+    icon: 'search',
+    label: 'Discovery budget',
+    desc: 'Base research rounds before an implementation request must start changing the deliverable.',
+  });
+  addRow(agent, {
     key: 'maxToolRounds',
     type: 'range',
     min: 0,
@@ -7808,8 +8115,8 @@ function renderSettingsPane() {
     step: 1,
     fmt: (v) => (Number(v) === 0 ? 'off' : String(v)),
     icon: 'restart',
-    label: 'Emergency tool ceiling',
-    desc: 'Optional last-resort ceiling. Keep at 0 to rely on semantic loop detection instead.',
+    label: 'Easy-task tool ceiling',
+    desc: 'Skadi classifies each request. Medium tasks receive 2x and hard tasks 3.75x, with a small verification reserve after the first edit.',
   });
   addRow(agent, {
     key: 'commandTimeoutSec',
@@ -7817,6 +8124,13 @@ function renderSettingsPane() {
     icon: 'stop',
     label: 'Command timeout',
     desc: 'Seconds before a single shell command is killed.',
+  });
+  addRow(agent, {
+    key: 'maxTurnMinutes',
+    type: 'number',
+    icon: 'stop',
+    label: 'Turn safety limit',
+    desc: 'Minutes before a long autonomous turn pauses with resumable progress. Set 0 to disable.',
   });
   addRow(agent, {
     key: 'webSearchProvider',
@@ -8167,6 +8481,7 @@ async function boot() {
   renderMode();
   await renderProviders(s.providers, s.activeProvider);
   setInstances(s.instances);
+  renderEmptyReadiness();
   if (s.vram) renderVram(s.vram);
   if (s.logs?.length) $('logBox').textContent = s.logs.map(logLine).join('\n');
 

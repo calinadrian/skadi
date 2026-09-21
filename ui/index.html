@@ -162,9 +162,33 @@
     </div>
     <div class="messages" id="messages">
       <div class="empty" id="emptyState">
+        <p class="empty-eyebrow">Ready to work</p>
         <h3>What should we build?</h3>
+        <p class="empty-copy">Confirm the workspace below, then describe the outcome you want.</p>
+        <div class="readiness" id="readiness" aria-label="Chat readiness"></div>
       </div>
     </div>
+
+    <section class="turn-status" id="turnStatus" role="status" aria-live="polite" hidden>
+      <div class="turn-status-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="turn-status-copy">
+        <div class="turn-status-head"><strong>Skadi is working</strong><span id="turnElapsed">0s</span></div>
+        <div class="turn-status-text" id="turnStatusText">Starting…</div>
+        <div class="turn-status-hint">You can switch chats. This work keeps running here.</div>
+      </div>
+    </section>
+
+    <section class="outcome-bar" id="outcomeBar" aria-label="Task result actions" hidden>
+      <div class="outcome-copy">
+        <svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>
+        <span><strong id="outcomeTitle">Task finished</strong><small id="outcomeHint">Inspect the result before continuing</small></span>
+      </div>
+      <div class="outcome-actions">
+        <button type="button" class="btn tiny" id="outcomeReview"><svg class="icon" aria-hidden="true"><use href="#i-diff"/></svg>Review</button>
+        <button type="button" class="btn tiny" id="outcomeFiles"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>Files</button>
+        <button type="button" class="btn tiny" id="outcomeBrowser"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>Browser</button>
+      </div>
+    </section>
 
     <div class="approval" id="approval" hidden>
       <svg class="icon warn-icon"><use href="#i-warn"/></svg>
@@ -304,6 +328,7 @@
     </header>
     <nav class="tool-tabs" id="toolTabs" aria-label="Workspace tool">
       <button type="button" class="active" data-tool="tasks" aria-label="Tasks" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg><span>Tasks</span><span class="tool-tab-count" id="taskTabCount" aria-hidden="true" hidden></span></button>
+      <button type="button" data-tool="plan" aria-label="Plan" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-list"/></svg><span>Plan</span><span class="tool-tab-count" id="planTabCount" aria-hidden="true" hidden></span></button>
       <button type="button" data-tool="review" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-diff"/></svg><span>Review</span></button>
       <button type="button" data-tool="files" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>Files</span></button>
       <button type="button" data-tool="ai" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg><span>Local AI</span></button>
@@ -314,6 +339,21 @@
           <header class="panel-head"><h2>Background tasks</h2><span class="count" id="taskCount"></span></header>
           <div class="task-list" id="taskList"></div>
         </section>
+      </section>
+      <section class="tool-pane plan-pane" data-tool-pane="plan" hidden aria-labelledby="planHeading">
+        <header class="plan-head">
+          <div>
+            <h2 id="planHeading">Execution plan</h2>
+            <p id="planSummary">The agent will create a plan for substantial work.</p>
+          </div>
+          <button type="button" class="btn tiny" id="planAdd"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add step</button>
+        </header>
+        <div class="plan-live" id="planLive" role="status" aria-live="polite"></div>
+        <ol class="plan-list" id="planList"></ol>
+        <div class="plan-undo" id="planUndo" hidden>
+          <span id="planUndoText">Step deleted.</span>
+          <button type="button" class="btn tiny" id="planUndoButton">Undo</button>
+        </div>
       </section>
       <section class="tool-pane review-pane" data-tool-pane="review" hidden>
         <div class="embedded-host review-host" id="reviewHost"></div>

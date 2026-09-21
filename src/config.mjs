@@ -10,6 +10,7 @@ export const CONFIG_PATH = join(ROOT, 'config', 'profiles.json');
 export const SETTINGS_PATH = join(ROOT, 'config', 'settings.json');
 
 export const DEFAULT_SETTINGS = {
+  settingsSchemaVersion: 1,
   // Directory the agent's file tools are confined to. Changed from the UI.
   workspace: join(ROOT, 'workspace'),
   uiPort: 7777,
@@ -21,13 +22,24 @@ export const DEFAULT_SETTINGS = {
   updateCheck: true,
   // Poll interval for the GPU memory sampler, milliseconds.
   vramPollMs: 2000,
-  // Optional emergency ceiling. Normal loop control is semantic: a lightweight
-  // supervisor judges whether the latest action made progress and prunes bad
-  // cycles from active context. 0 disables this count-based fallback.
+  // Easy-task emergency ceiling. Medium tasks receive 2x and hard tasks 3.75x;
+  // the classifier preserves a tight bug-fix budget without truncating larger
+  // builds. 0 disables this count-based fallback.
   maxToolRounds: 0,
+  // Implementation requests must converge. After this many successful
+  // discovery/test rounds without a file edit, stop instead of spending an
+  // unlimited turn re-diagnosing the same small bug. 0 disables the guard.
+  maxImplementationDiscoveryRounds: 4,
+  // The semantic supervisor uses the same model. Reviewing every action can
+  // double local inference time, so deterministic loop checks run every round
+  // while the model reviewer samples every N rounds.
+  loopReviewEvery: 3,
   loopDetection: true,
   // The supervisor is a classification task, so thinking is off by default.
   loopReviewEffort: 'low',
+  // A single autonomous turn should not occupy a local model indefinitely.
+  // The transcript and file changes are saved, so this limit is resumable.
+  maxTurnMinutes: 45,
   // Route bounded research/search/summary work through a read-only child
   // before the parent turn. Both routing and the default child run without
   // reasoning unless the user raises this setting or the tool argument.
@@ -283,7 +295,22 @@ export function saveModelMeta(patch) {
 }
 
 export function loadSettings() {
-  return { ...DEFAULT_SETTINGS, ...readJson(SETTINGS_PATH, DEFAULT_SETTINGS) };
+  const saved = readJson(SETTINGS_PATH, DEFAULT_SETTINGS);
+  const migrated = migrateSettings(saved);
+  if (existsSync(SETTINGS_PATH) && canonical(saved) !== canonical(migrated)) writeJson(SETTINGS_PATH, migrated);
+  return { ...DEFAULT_SETTINGS, ...migrated };
+}
+
+/** Migrate settings that were once shipped as defaults without overriding
+ * later, explicit choices. Version 0 used an 8-round easy-task limit, which
+ * became 30 rounds for hard tasks and paused valid work despite semantic loop
+ * detection. The replacement default is opt-out by time/semantics, not count. */
+export function migrateSettings(saved = {}) {
+  const next = { ...saved };
+  const version = Number(next.settingsSchemaVersion) || 0;
+  if (version < 1 && Number(next.maxToolRounds) === 8) next.maxToolRounds = 0;
+  next.settingsSchemaVersion = 1;
+  return next;
 }
 
 export function saveSettings(settings) {

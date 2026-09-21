@@ -12,6 +12,7 @@
 import { readFile, writeFile, readdir, rename, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { normalisePlan } from './plans.mjs';
 
 const id = () => `${new Date().toISOString().replace(/[:.]/g, '-')}-${Math.random().toString(36).slice(2, 7)}`;
 const groupId = () => `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -32,6 +33,7 @@ const normaliseSession = (s) => ({
   // list is quiet until something actually needs attention.
   unread: Boolean(s.unread),
   groupId: typeof s.groupId === 'string' && s.groupId ? s.groupId : null,
+  plan: normalisePlan(s.plan),
 });
 
 export class SessionStore {

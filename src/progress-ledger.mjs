@@ -1,8 +1,38 @@
 import { createHash } from 'node:crypto';
 
 const MUTATION_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'memory_write', 'skill_write']);
-const VERIFICATION_TOOLS = new Set(['run_command', 'browser_snapshot', 'browser_screenshot', 'browser_console', 'task_log']);
-const DISCOVERY_TOOLS = new Set(['grep', 'glob', 'list_dir', 'read_file', 'web_search', 'memory_search', 'skill_read']);
+const VERIFICATION_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_console', 'browser_read', 'task_log']);
+const DISCOVERY_TOOLS = new Set(['grep', 'glob', 'list_dir', 'read_file', 'web_search', 'browser_extract', 'memory_search', 'skill_read']);
+
+const PLACEHOLDER_PATTERNS = [
+  /\b(?:todo|placeholder|coming soon|not implemented)\b/i,
+  /\b(?:data|content|results?|items?|comps?|openers?)\b.{0,40}\bwill appear here\b/i,
+  /\b(?:openers?|comps?|champions?|items?|builds?|lines?)\s*:\s*\[\s*\]/i,
+];
+
+const placeholderReason = (value) => {
+  const text = String(value ?? '');
+  if (!text) return '';
+  if (PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(text))) {
+    return 'placeholder or empty required content remains';
+  }
+  return '';
+};
+
+const commandVerifies = (command) => {
+  const text = String(command || '').toLowerCase();
+  if (!text) return false;
+  // Acquisition, dev-server startup and file inspection are useful, but they
+  // do not prove that the edited deliverable works.
+  if (/invoke-webrequest|curl\b|wget\b|start-process|\bserve\b|server\.m?js|http\.server|get-content|select-string/.test(text)) return false;
+  return /(?:^|[\s;&|])(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build|lint|check)|\bnode\s+--test\b|\b(?:pytest|cargo\s+test|go\s+test|dotnet\s+test|ctest|make\s+test|tsc\b|eslint\b|stylelint\b)/.test(text);
+};
+
+const supportArtifact = (path) => /(?:^|[\\/])(?:_?check|probe|scratch|tmp|temp)(?:[._-]|$)/i.test(String(path || ''));
+
+export function completionGaps(ledger) {
+  return [...ledger.artifactGaps.entries()].map(([path, reason]) => `${path}: ${reason}`);
+}
 
 const clip = (value, length = 500) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, length);
 
@@ -24,14 +54,95 @@ export function implementationRequest(text) {
   return /\b(fix|implement|add|change|remove|replace|update|improve|build|create|make|repair|refactor|doesn(?:'|’)t work|not working|broken)\b/i.test(String(text || ''));
 }
 
+const messageText = (content) => {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part) => part?.type === 'text')
+    .map((part) => String(part.text || '').trim())
+    .filter(Boolean)
+    .join('\n');
+};
+
+const compactedGoal = (messages) => {
+  for (const message of [...(messages || [])].reverse()) {
+    if (message?.role !== 'assistant') continue;
+    const text = messageText(message.content);
+    if (!text.startsWith('[Compacted context')) continue;
+    const goal = text.match(/^#+\s*User Goal\s*\n+([\s\S]*?)(?=\n#+\s|$)/im);
+    return goal ? goal[1].trim() : '';
+  }
+  return '';
+};
+
+export function objectiveFromMessages(messages) {
+  const userTexts = (messages || [])
+    .filter((message) => message?.role === 'user')
+    .map((message) => messageText(message.content))
+    .filter(Boolean);
+  const continuation = /^(?:continue|go on|keep going|finish(?: it)?|proceed|try again|yes|ok(?:ay)?)\W*$/i;
+  const generatedHandoff = /^(?:screenshot|image) of (?:the )?(?:current )?page/i;
+  const candidates = userTexts.filter((text) => !continuation.test(text) && !generatedHandoff.test(text));
+  // Compaction can drop every user message. The summary then holds the only
+  // record of the goal; without it the ledger reads the run as a non-
+  // implementation task and the discovery budget never applies.
+  if (!candidates.length) return compactedGoal(messages) || userTexts.at(-1) || '';
+
+  const objective = [...candidates].reverse().find((text) => implementationRequest(text) && text.length >= 30)
+    || candidates.at(-1);
+  const latest = candidates.at(-1);
+  return latest && latest !== objective && latest.length >= 12
+    ? `${objective}\nLatest user direction: ${latest}`
+    : objective;
+}
+
+export function incompleteCompletion(text) {
+  return /\b(?:still empty|actual .{0,30} (?:is|are) (?:still )?empty|placeholder(?:s| data)?|not (?:yet )?(?:implemented|finished|included)|couldn(?:'|’)t (?:fetch|extract|finish|complete)|can(?:not|'t) responsibly (?:build|implement)|hit a blocker|before I (?:can )?start building|to finish (?:it|this)|one honest gap|remaining work|missing (?:data|assets?|icons?|content)|once I have the data)\b/i.test(String(text || ''));
+}
+
+export function taskComplexity(text) {
+  const request = String(text || '').toLowerCase();
+  const product = /\b(website|web app|application|dashboard|portal|game|redesign|migration)\b/.test(request);
+  const externalData = /\b(current|latest|popular|best|patch|live|website|web|api|scrap|fetch|research|real (?:icons|images|data)|assets?)\b/.test(request);
+  const broadScope = /\b(complete|full|entire|end[- ]to[- ]end|multiple|all|everything|from scratch|main (?:page|lines))\b/.test(request);
+  const actionCount = (request.match(/\b(build|create|make|design|implement|add|fix|fetch|research|verify|test|deploy)\b/g) || []).length;
+  if ((product && (externalData || broadScope)) || (externalData && broadScope) || actionCount >= 4) return 'hard';
+
+  const directFix = /\b(fix|repair|rename|change|remove|replace)\b/.test(request);
+  const multiPart = /\b(and|also|then|plus|as well as)\b/.test(request) || actionCount >= 2;
+  if (directFix && !externalData && !broadScope && !multiPart && request.length <= 220) return 'easy';
+  return 'medium';
+}
+
+export function taskBudgets(settings, complexity) {
+  const baseRounds = Number(settings?.maxToolRounds);
+  const baseDiscovery = Number(settings?.maxImplementationDiscoveryRounds ?? 4);
+  const roundScale = { easy: 1, medium: 2, hard: 3.75 }[complexity] || 2;
+  const discoveryScale = { easy: 1, medium: 1.5, hard: 2 }[complexity] || 1.5;
+  return {
+    maxRounds: Number.isFinite(baseRounds) && baseRounds > 0
+      ? Math.min(60, Math.max(1, Math.round(baseRounds * roundScale)))
+      : 0,
+    discoveryRounds: Number.isFinite(baseDiscovery) && baseDiscovery > 0
+      ? Math.min(20, Math.max(1, Math.round(baseDiscovery * discoveryScale)))
+      : 0,
+  };
+}
+
 export function createProgressLedger(request = '') {
   return {
     request: clip(request, 1600),
     implementation: implementationRequest(request),
+    complexity: taskComplexity(request),
     phase: 'locate',
     rounds: 0,
     mutations: 0,
+    firstMutationRound: 0,
+    firstMaterialMutationRound: 0,
     verifications: 0,
+    materialMutations: 0,
+    lastMaterialProgressAt: Date.now(),
+    artifactGaps: new Map(),
     inspected: new Set(),
     actions: new Map(),
     loopStrikes: new Map(),
@@ -76,13 +187,34 @@ export function observeToolRound(ledger, calls, results) {
     }
     if (MUTATION_TOOLS.has(name) && result.ok !== false) {
       ledger.mutations++;
+      if (!ledger.firstMutationRound) ledger.firstMutationRound = ledger.rounds;
       mutated = true;
-      ledger.phase = 'verify';
+
+      const path = String(args?.path || '(edited artifact)');
+      const evidence = name === 'write_file' ? args?.content : args?.new_string;
+      const oldEvidence = name === 'edit_file' ? args?.old_string : '';
+      const gap = placeholderReason(evidence);
+      if (gap) ledger.artifactGaps.set(path, gap);
+      else if (name === 'write_file' || placeholderReason(oldEvidence)) ledger.artifactGaps.delete(path);
+
+      if (!supportArtifact(path)) {
+        ledger.materialMutations++;
+        if (!ledger.firstMaterialMutationRound) ledger.firstMaterialMutationRound = ledger.rounds;
+        ledger.lastMaterialProgressAt = Date.now();
+        ledger.phase = 'verify';
+      }
     }
-    if (VERIFICATION_TOOLS.has(name) && result.ok !== false && ledger.mutations > 0) {
+
+    const runtimeGap = placeholderReason(result.content);
+    if (runtimeGap && ledger.implementation) ledger.artifactGaps.set('(rendered output)', runtimeGap);
+    else if (VERIFICATION_TOOLS.has(name) && result.ok !== false) ledger.artifactGaps.delete('(rendered output)');
+
+    const verifies = VERIFICATION_TOOLS.has(name) || (name === 'run_command' && commandVerifies(args?.command));
+    if (verifies && result.ok !== false && ledger.materialMutations > 0) {
       ledger.verifications++;
       verified = true;
-      ledger.phase = 'complete';
+      ledger.lastMaterialProgressAt = Date.now();
+      ledger.phase = ledger.artifactGaps.size ? 'implement' : 'complete';
     }
     ledger.last = `${name} ${result.ok === false ? 'failed' : 'completed'}: ${clip(result.content, 260)}`;
   }
@@ -97,15 +229,19 @@ export function recordLoop(ledger, fingerprint = 'semantic') {
 
 export function progressLedgerText(ledger) {
   const inspected = [...ledger.inspected].slice(-8);
+  const gaps = completionGaps(ledger);
+  const unedited = ledger.implementation && ledger.rounds > 0 && ledger.materialMutations === 0;
   return [
     'PROGRESS LEDGER (authoritative; do not repeat completed discovery):',
     `Objective: ${ledger.request || '(unknown)'}`,
+    `Estimated task size: ${ledger.complexity}`,
     `Phase: ${ledger.phase}`,
-    `Material edits: ${ledger.mutations}; post-edit verification actions: ${ledger.verifications}`,
+    `File edits: ${ledger.mutations}; material deliverable edits: ${ledger.materialMutations}; valid post-edit verification actions: ${ledger.verifications}`,
     `Inspected: ${inspected.length ? inspected.join(', ') : '(none)'}`,
+    `Open completion gaps: ${gaps.length ? gaps.join('; ') : '(none detected in edited files)'}${unedited ? ' -- BUT the task is NOT complete: no deliverable file has been edited yet. Research alone does not satisfy the request; make the edits.' : ''}`,
     `Latest result: ${ledger.last || '(none)'}`,
     ledger.implementation
-      ? 'Completion contract: locate the responsible code, establish a falsifiable cause, edit it, then run a relevant verification. Syntax-only checks do not prove runtime behavior.'
+      ? `Completion contract: locate the responsible code, establish a falsifiable cause, edit it, then run a relevant verification. Syntax-only checks do not prove runtime behavior.${ledger.complexity === 'hard' ? ' A scaffold, empty dataset, placeholder assets, or a stated remaining gap is not completion.' : ''}`
       : 'Completion contract: answer the objective directly and stop when sufficient evidence exists.',
   ].join('\n');
 }

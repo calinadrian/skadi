@@ -16,9 +16,13 @@ import {
 } from './compaction.mjs';
 import {
   createProgressLedger,
+  completionGaps,
+  incompleteCompletion,
+  objectiveFromMessages,
   observeToolRound,
   recordLoop,
   progressLedgerText,
+  taskBudgets,
 } from './progress-ledger.mjs';
 
 const BASE_PROMPT = `You are Skadi, a coding agent running on the user's Windows machine.
@@ -32,6 +36,7 @@ Guidelines:
 - After editing code, run the relevant test or build command if one exists.
 - If a tool fails, read the error and adapt. Do not retry the identical call.
 - For implementation work, move deliberately through locate, diagnose, implement, and verify. A plausible theory is not a diagnosis, and a syntax check is not runtime proof.
+- For medium or hard implementation work, create a concise 3-8 step execution plan with update_plan before broad exploration. Keep exactly one current step marked working, update steps as evidence lands, and follow user edits to the plan. Do not recreate work the user skipped or deleted. A plan is a coordination surface, not an approval gate: continue automatically unless a real permission or product decision blocks you.
 - Delegate bounded discovery, searching, code-location, and summarisation work with delegate_task before doing broad exploration yourself. Use reasoning "none" for routine find/search/summary tasks; increase it only when the delegated analysis genuinely needs it. Keep edits and final runtime verification in the parent agent.
 - When you are done, say plainly what you changed. If something did not work, say so.
 - This chat is the only one you can see. Other sessions are private and the harness blocks every path into them, so never go looking for them: what you know of earlier work is what is in this conversation, in memory, or in the project itself. If the user's request depends on something from another chat, ask them for it.`;
@@ -130,6 +135,10 @@ export class Agent extends EventEmitter {
     // optional -- a bare Agent (the manual compactor) can run without them.
     this.persist = null;
     this.archive = null;
+    // Optional per-round context supplied by the server. Unlike the system
+    // prompt, this is evaluated immediately before every provider request, so
+    // an execution plan edited mid-turn becomes authoritative next round.
+    this.liveGuidance = null;
   }
 
   /**
@@ -202,21 +211,32 @@ export class Agent extends EventEmitter {
     this.autoCompactBlocked = false;
     let rounds = 0;
     let roundRetried = false; // overflow-recovery retry used for this round
-    // Positive values are an optional emergency ceiling. Zero leaves stopping
-    // to semantic loop detection and the model completing the task.
-    const configuredRounds = Number(this.settings.maxToolRounds);
-    const maxRounds = Number.isFinite(configuredRounds) && configuredRounds > 0 ? Math.floor(configuredRounds) : 0;
-    const bounded = maxRounds > 0;
     const turnStarted = Date.now();
     let totalTokens = 0;
     let loopGuidance = '';
-    const initialRequest = [...messages].reverse().find((message) => message.role === 'user');
-    const ledger = createProgressLedger(typeof initialRequest?.content === 'string' ? initialRequest.content : '');
+    let implementationGuidance = '';
+    let forceImplementation = false;
+    const ledger = createProgressLedger(objectiveFromMessages(messages));
+    const budgets = taskBudgets(this.settings, ledger.complexity);
+    const maxRounds = budgets.maxRounds;
+    const bounded = maxRounds > 0;
+    const verificationReserve = ledger.complexity === 'hard' ? 4 : ledger.complexity === 'medium' ? 3 : 2;
+    const activeRoundLimit = () => Math.max(maxRounds, ledger.firstMaterialMutationRound ? ledger.firstMaterialMutationRound + verificationReserve : 0);
+    const maxTurnMinutes = Math.max(0, Number(this.settings.maxTurnMinutes) || 0);
+    const turnDeadline = maxTurnMinutes ? turnStarted + maxTurnMinutes * 60_000 : 0;
+    const reviewEvery = Math.max(1, Number(this.settings.loopReviewEvery) || 3);
 
     try {
-      while (!bounded || rounds < maxRounds) {
+      while (!bounded || rounds < activeRoundLimit()) {
+        if (turnDeadline && Date.now() >= turnDeadline) {
+          const gaps = completionGaps(ledger);
+          const note = `Paused after the ${maxTurnMinutes}-minute turn safety limit. The task is incomplete. Current phase: ${ledger.phase}. ${gaps.length ? `Open gaps: ${gaps.join('; ')}.` : 'Continue from the saved progress instead of restarting discovery.'}`;
+          await this._append(messages, { role: 'assistant', content: note });
+          this.emit('done', { rounds, truncated: true, incomplete: true, reason: 'time_limit', totalTokens, turnMs: Date.now() - turnStarted });
+          return messages;
+        }
         rounds++;
-        this.emit('round', { round: rounds, maxRounds });
+        this.emit('round', { round: rounds, maxRounds: activeRoundLimit(), complexity: ledger.complexity, phase: ledger.phase });
         const roundStart = messages.length;
 
         // Preflight (opencode-style): compact before the request goes out when
@@ -241,7 +261,12 @@ export class Agent extends EventEmitter {
 
         let reply;
         try {
-          reply = await this._stream(messages, sampling, [progressLedgerText(ledger), loopGuidance].filter(Boolean).join('\n\n'));
+          reply = await this._stream(
+            messages,
+            sampling,
+            [progressLedgerText(ledger), loopGuidance, implementationGuidance].filter(Boolean).join('\n\n'),
+            forceImplementation ? this.schemas.filter((schema) => ['edit_file', 'write_file'].includes(schema?.function?.name)) : this.schemas,
+          );
         } catch (err) {
           // Overflow recovery: one compact-and-retry per round. A second
           // rejection means the window genuinely cannot hold the work, and
@@ -250,7 +275,12 @@ export class Agent extends EventEmitter {
             roundRetried = true;
             const result = await this.compact(messages, { manual: false });
             if (!result.compacted) throw err;
-            reply = await this._stream(messages, sampling, [progressLedgerText(ledger), loopGuidance].filter(Boolean).join('\n\n'));
+            reply = await this._stream(
+              messages,
+              sampling,
+              [progressLedgerText(ledger), loopGuidance, implementationGuidance].filter(Boolean).join('\n\n'),
+              forceImplementation ? this.schemas.filter((schema) => ['edit_file', 'write_file'].includes(schema?.function?.name)) : this.schemas,
+            );
           } else {
             throw err;
           }
@@ -272,6 +302,51 @@ export class Agent extends EventEmitter {
         });
 
         if (!reply.message.tool_calls?.length) {
+          if (forceImplementation && ledger.materialMutations === 0) {
+            const removed = messages.splice(roundStart);
+            if (removed.length) await this.archive?.(removed);
+            implementationGuidance = 'You tried to end an implementation request without changing a file. Discovery is complete. Use edit_file or write_file now to make the smallest justified fix. Do not explain, search, test, or stop before the edit.';
+            this.emit('loop_detected', { round: rounds, reason: 'attempted to finish without implementing', next: 'make the smallest justified file edit', removed: removed.length });
+            await this.persist?.();
+            continue;
+          }
+          const gaps = completionGaps(ledger);
+          if (ledger.implementation && gaps.length) {
+            const removed = messages.splice(roundStart);
+            if (removed.length) await this.archive?.(removed);
+            implementationGuidance = `You tried to finish while the progress ledger still shows incomplete deliverables: ${gaps.join('; ')}. Replace the placeholder or empty content with the requested real content, then verify the rendered result. Do not claim completion.`;
+            this.emit('loop_detected', { round: rounds, reason: 'attempted to finish with unresolved deliverable gaps', next: 'replace placeholder content and verify the rendered result', removed: removed.length });
+            this.emit('transcript', { reason: 'incomplete_deliverable' });
+            await this.persist?.();
+            continue;
+          }
+          if (ledger.implementation && ledger.materialMutations > 0 && ledger.verifications === 0) {
+            const removed = messages.splice(roundStart);
+            if (removed.length) await this.archive?.(removed);
+            implementationGuidance = 'You tried to finish after editing without a relevant verification. Run the smallest test, build, or rendered-browser check that exercises the changed deliverable. Research downloads, dev-server startup, and syntax-only narration do not count.';
+            this.emit('loop_detected', { round: rounds, reason: 'attempted to finish without verifying the edited deliverable', next: 'run a relevant test, build, or rendered-browser check', removed: removed.length });
+            this.emit('transcript', { reason: 'unverified_deliverable' });
+            await this.persist?.();
+            continue;
+          }
+          if (
+            ledger.implementation
+            && ledger.complexity === 'hard'
+            && incompleteCompletion(reply.message.content)
+            && (!bounded || rounds < activeRoundLimit())
+          ) {
+            const removed = messages.splice(roundStart);
+            if (removed.length) await this.archive?.(removed);
+            implementationGuidance = 'You tried to declare a hard task complete while admitting that required data, assets, content, or implementation is still missing. A scaffold is not the requested deliverable. Continue now: use browser_extract on the dynamic source, try the next credible source if needed, populate the real data/assets, and verify the completed result. Do not ask the user to supply information that is available from the sources they named.';
+            this.emit('loop_detected', {
+              round: rounds,
+              reason: 'attempted to finish a hard task with an admitted completion gap',
+              next: 'retrieve and implement the missing required content, then verify the complete result',
+              removed: removed.length,
+            });
+            await this.persist?.();
+            continue;
+          }
           // A thinking model can spend a whole round reasoning and emit no
           // visible answer. Surface the reasoning rather than ending on a blank.
           if (!reply.message.content && reply.message.reasoning_content) {
@@ -304,11 +379,41 @@ export class Agent extends EventEmitter {
           this.emit('tool_result', { id: call.id, name: call.function.name, ...result });
         }
 
-        const deterministic = observeToolRound(ledger, reply.message.tool_calls, toolResults).repeated;
+        const observed = observeToolRound(ledger, reply.message.tool_calls, toolResults);
+        const deterministic = observed.repeated;
+        this.emit('progress', {
+          phase: ledger.phase,
+          rounds: ledger.rounds,
+          edits: ledger.materialMutations,
+          verifications: ledger.verifications,
+          gaps: completionGaps(ledger),
+        });
+
+        const discoveryLimit = budgets.discoveryRounds;
+        if (ledger.implementation && ledger.materialMutations === 0 && discoveryLimit && ledger.rounds >= discoveryLimit) {
+          forceImplementation = true;
+          implementationGuidance = `Discovery budget reached after ${ledger.rounds} rounds with no edit. Using the evidence already gathered, state the cause and minimal plan internally, then use edit_file or write_file on the next action. Discovery tools are now unavailable. Do not stop, search, or run another test before editing.`;
+        } else if (
+          ledger.implementation
+          && ledger.materialMutations === 0
+          && discoveryLimit
+          && ledger.rounds >= Math.max(1, discoveryLimit - 2)
+        ) {
+          implementationGuidance = `Convergence checkpoint: identify the most likely cause from the evidence already gathered and form a minimal edit plan now. At most ${discoveryLimit - ledger.rounds} discovery round(s) remain before the agent must implement. Do not broaden the investigation.`;
+        } else if (ledger.materialMutations > 0) {
+          forceImplementation = false;
+          implementationGuidance = completionGaps(ledger).length
+            ? `Implementation has started, but it is not complete. Resolve these detected gaps before reporting success: ${completionGaps(ledger).join('; ')}.`
+            : ledger.verifications > 0
+              ? 'The deliverable has material edits and a relevant verification. Fix any observed regression or report the completed result plainly.'
+              : 'Implementation has started. Run the smallest relevant verification of the actual deliverable, fix regressions caused by the edit, then report the result.';
+        }
 
         if (this.settings.loopDetection !== false && this.reviewProgress && !this.pendingImages.length) {
           let review = deterministic;
-          if (!review) {
+          const semanticReviewDue = this.stopOnLoop || ledger.rounds % reviewEvery === 0
+            || (ledger.implementation && ledger.materialMutations === 0 && discoveryLimit && ledger.rounds >= discoveryLimit - 1);
+          if (!review && semanticReviewDue) {
             try {
               review = await this.reviewProgress({
                 messages,
@@ -365,9 +470,10 @@ export class Agent extends EventEmitter {
         if (await this._drainSteers(messages)) rounds = 0;
       }
 
-      const note = `Stopped at the optional emergency ceiling of ${maxRounds} tool rounds. Semantic loop detection remained active; raise or disable the ceiling if this task is intentionally larger.`;
+      const gaps = completionGaps(ledger);
+      const note = `Stopped at the adaptive ${ledger.complexity}-task emergency ceiling of ${activeRoundLimit()} tool rounds. Semantic loop detection remained active. The task is incomplete; continue it from the saved progress rather than treating this as a finished result.${gaps.length ? ` Open gaps: ${gaps.join('; ')}.` : ''}`;
       await this._append(messages, { role: 'assistant', content: note });
-      this.emit('done', { rounds, truncated: true, totalTokens, turnMs: Date.now() - turnStarted });
+      this.emit('done', { rounds, truncated: true, incomplete: true, reason: 'round_limit', totalTokens, turnMs: Date.now() - turnStarted });
       return messages;
     } catch (err) {
       // Stopped, rejected or disconnected mid-reply: whatever the model had
@@ -644,16 +750,18 @@ export class Agent extends EventEmitter {
     }
   }
 
-  async _stream(messages, sampling, guidance = '') {
+  async _stream(messages, sampling, guidance = '', schemas = this.schemas) {
     this.abortController = new AbortController();
     const partial = { content: '', reasoning: '' };
     this.partial = partial;
+    const live = this.liveGuidance?.() || '';
+    const combinedGuidance = [guidance, live].filter(Boolean).join('\n\n');
     const result = await streamCompletion(
       this.provider,
       {
         model: this.model,
-        messages: guidance ? [...messages, { role: 'system', content: guidance }] : messages,
-        tools: this.schemas,
+        messages: combinedGuidance ? [...messages, { role: 'system', content: combinedGuidance }] : messages,
+        tools: schemas,
         sampling,
       },
       {

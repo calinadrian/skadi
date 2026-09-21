@@ -29,7 +29,10 @@ async function walkSkills(root, dir = 'defaults/skills') {
     const rel = `${dir}/${name}`;
     const info = await stat(join(root, rel)).catch(() => null);
     if (info?.isDirectory()) out.push(...(await walkSkills(root, rel)));
-    else if (info?.isFile() && /\.md$/i.test(name)) out.push(rel);
+    // A skill is a package, not only its SKILL.md. Search indexes, scripts,
+    // references, fixtures and assets are part of its behaviour and must make
+    // the same trip to a release as the entrypoint that refers to them.
+    else if (info?.isFile()) out.push(rel);
   }
   return out;
 }

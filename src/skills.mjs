@@ -14,7 +14,23 @@
 // cost thousands of prompt tokens on every single turn.
 import { readFile, readdir, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join, sep, dirname, basename } from 'node:path';
-import { existsSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+
+/** Install starter skills one package at a time. Existing user skills always
+ * win; this only makes newly bundled starters available after an app update. */
+export function seedBundledSkills(defaultsDir, skillsDir) {
+  if (!existsSync(defaultsDir)) return [];
+  mkdirSync(skillsDir, { recursive: true });
+  const added = [];
+  for (const entry of readdirSync(defaultsDir, { withFileTypes: true })) {
+    const source = join(defaultsDir, entry.name);
+    const target = join(skillsDir, entry.name);
+    if (existsSync(target)) continue;
+    cpSync(source, target, { recursive: entry.isDirectory(), errorOnExist: true });
+    added.push(entry.name);
+  }
+  return added.sort();
+}
 
 /** Directory-safe identifier. Skill names become directory names, so unlike a
  *  display string this must never contain separators or parent references. */
@@ -83,7 +99,13 @@ export class SkillStore {
       throw new Error(`no skill named "${name}". Available: ${names}`);
     }
     const { body } = parseFrontMatter(await readFile(hit.file, 'utf8'));
-    return { ...hit, body };
+    const skillDir = dirname(hit.file);
+    const bundledClaudePath = `\${CLAUDE_PLUGIN_ROOT}/.claude/skills/${basename(skillDir)}`;
+    // Some portable skills were authored for Claude's plugin layout. Resolve
+    // that conventional placeholder at load time so their scripts and data are
+    // actually runnable from a Skadi installation at any path.
+    const portableBody = body.replaceAll(bundledClaudePath, skillDir.replaceAll('\\', '/'));
+    return { ...hit, body: portableBody };
   }
 
   async save(name, description, body) {
