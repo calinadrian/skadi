@@ -15,7 +15,10 @@ import {
   SUMMARY_PROMPT,
 } from './compaction.mjs';
 import {
+  applyLedgerOverride,
   createProgressLedger,
+  ledgerView,
+  seedLedger,
   completionGaps,
   incompleteCompletion,
   objectiveFromMessages,
@@ -141,6 +144,9 @@ export class Agent extends EventEmitter {
     // prompt, this is evaluated immediately before every provider request, so
     // an execution plan edited mid-turn becomes authoritative next round.
     this.liveGuidance = null;
+    // Returns { override, snapshot } for the current session: the user's manual
+    // ledger corrections and the counters saved by earlier turns.
+    this.liveLedger = null;
   }
 
   /**
@@ -225,6 +231,8 @@ export class Agent extends EventEmitter {
     let implementationGuidance = '';
     let forceImplementation = false;
     const ledger = createProgressLedger(objectiveFromMessages(messages));
+    seedLedger(ledger, this.liveLedger?.()?.snapshot);
+    applyLedgerOverride(ledger, this.liveLedger?.()?.override);
     const budgets = taskBudgets(this.settings, ledger.complexity);
     const maxRounds = budgets.maxRounds;
     const bounded = maxRounds > 0;
@@ -249,6 +257,8 @@ export class Agent extends EventEmitter {
           return messages;
         }
         rounds++;
+        // Manual edits from the UI apply on the very next round.
+        applyLedgerOverride(ledger, this.liveLedger?.()?.override);
         this.emit('round', { round: rounds, maxRounds: activeRoundLimit(), complexity: ledger.complexity, phase: ledger.phase });
         const roundStart = messages.length;
 
@@ -400,6 +410,7 @@ export class Agent extends EventEmitter {
           edits: ledger.materialMutations,
           verifications: ledger.verifications,
           gaps: completionGaps(ledger),
+          ledger: ledgerView(ledger),
         });
 
         const discoveryLimit = budgets.discoveryRounds;
@@ -586,7 +597,7 @@ export class Agent extends EventEmitter {
         summaryInputTokens: inputCap,
         toolOutputChars: cfg.toolOutputChars,
       });
-      dropped += truncated.dropped;
+      dropped = truncated.dropped;
       const summands = truncated.messages;
       try {
         const result = await streamCompletion(

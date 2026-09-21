@@ -1520,6 +1520,106 @@ async function planAction(action, extra = {}) {
   return plan;
 }
 
+// ---- progress ledger: what the agent believes about its own progress ------
+const LEDGER_PHASES = ['locate', 'diagnose', 'implement', 'verify', 'complete'];
+const NO_OVERRIDE = { dismissed: [], phase: '', note: '' };
+
+function acceptLedger({ ledger, state: saved } = {}) {
+  state.ledgerOverride = ledger || NO_OVERRIDE;
+  if (saved) state.ledgerSaved = saved;
+  renderLedger();
+}
+
+// The live view while a turn runs; the saved counters when it is idle.
+function ledgerViewNow() {
+  if (state.ledgerLive) return state.ledgerLive;
+  const saved = state.ledgerSaved;
+  if (!saved) return null;
+  return {
+    request: saved.request,
+    phase: saved.phase,
+    materialEdits: saved.materialMutations,
+    verifications: saved.verifications,
+    inspected: saved.inspected || [],
+    gaps: (saved.gaps || []).map(([key, reason]) => ({ key, reason })),
+  };
+}
+
+async function ledgerAction(patch) {
+  if (!state.sessionId) throw new Error('Send the first message before editing its ledger.');
+  const result = await api('session/ledger', { id: state.sessionId, ...patch });
+  if (patch.reset) {
+    state.ledgerLive = null;
+    state.ledgerSaved = null;
+  }
+  acceptLedger(result);
+}
+
+function renderLedger() {
+  const body = $('ledgerBody');
+  if (!body) return;
+  const view = ledgerViewNow();
+  const override = state.ledgerOverride || NO_OVERRIDE;
+  const dismissed = new Set(override.dismissed);
+  const open = view ? view.gaps.filter((gap) => !dismissed.has(gap.key)).length : 0;
+  const count = $('ledgerTabCount');
+  count.hidden = open === 0;
+  count.textContent = String(open);
+  $('ledgerReset').disabled = !state.sessionId;
+  if (!view) {
+    $('ledgerSummary').textContent = 'What the agent is told about its own progress each round.';
+    body.replaceChildren(el('p', 'ledger-hint', state.sessionId
+      ? 'No ledger yet. It appears once the agent has taken a step, and your corrections apply from the next round.'
+      : 'Start a chat first.'));
+    return;
+  }
+  $('ledgerSummary').textContent = `${view.materialEdits ?? 0} deliverable edits · ${view.verifications ?? 0} verifications · ${open} open gap${open === 1 ? '' : 's'}`;
+
+  const request = el('p', 'ledger-request', view.request || '(unknown objective)');
+
+  const phase = el('select', 'ledger-phase');
+  phase.setAttribute('aria-label', 'Phase');
+  phase.append(new Option('Automatic', ''));
+  for (const name of LEDGER_PHASES) phase.append(new Option(name[0].toUpperCase() + name.slice(1), name));
+  phase.value = override.phase || '';
+  phase.onchange = guard(() => ledgerAction({ phase: phase.value }));
+  const phaseRow = el('label', 'ledger-row', 'Phase');
+  phaseRow.append(phase, el('span', 'ledger-hint', override.phase ? `locked to ${override.phase}` : `currently ${view.phase}`));
+
+  const gaps = el('ul', 'ledger-gaps');
+  const rows = view.gaps.map((gap) => ({ ...gap, dismissed: dismissed.has(gap.key) }));
+  for (const key of dismissed) {
+    if (!rows.some((gap) => gap.key === key)) rows.push({ key, reason: '(no longer detected)', dismissed: true });
+  }
+  if (!rows.length) gaps.append(el('li', 'ledger-hint', 'No open gaps.'));
+  for (const gap of rows) {
+    const li = el('li', gap.dismissed ? 'ledger-gap dismissed' : 'ledger-gap');
+    const button = el('button', 'btn tiny', gap.dismissed ? 'Restore' : 'Dismiss');
+    button.type = 'button';
+    button.title = gap.dismissed ? 'Show this gap to the agent again' : 'Tell the agent this gap is not real';
+    button.onclick = guard(() => ledgerAction(gap.dismissed ? { restoreGap: gap.key } : { dismissGap: gap.key }));
+    li.append(el('span', null, `${gap.key}: ${gap.reason}`), button);
+    gaps.append(li);
+  }
+
+  const note = el('textarea', 'ledger-note');
+  note.rows = 3;
+  note.maxLength = 800;
+  note.placeholder = 'A correction the agent must follow, e.g. "The fix is done and tests pass; just report the result."';
+  note.value = override.note || '';
+  const save = el('button', 'btn tiny', 'Save note');
+  save.type = 'button';
+  save.onclick = guard(() => ledgerAction({ note: note.value }));
+
+  body.replaceChildren(
+    request,
+    phaseRow,
+    el('h3', 'ledger-h', 'Open gaps'), gaps,
+    el('h3', 'ledger-h', 'Your correction'), note, save,
+    el('p', 'ledger-hint', `Inspected: ${(view.inspected || []).join(', ') || '(none)'}`),
+  );
+}
+
 function planIconButton(name, label, onClick, disabled = false) {
   const button = el('button', 'icon-btn plan-action');
   button.type = 'button';
@@ -1856,7 +1956,7 @@ function closeChanges() {
 function renderChangesProjects() {
   const select = $('changesProject');
   select.replaceChildren(...state.projects.map((p) => {
-    const option = el('option', null, p.name);
+    const option = el('option', null, p.exists === false ? `${p.name}  (folder missing)` : p.name);
     option.value = p.id;
     return option;
   }));
@@ -2911,13 +3011,16 @@ function renderProjects(projects, active) {
   const sel = $('projectSelect');
   sel.replaceChildren();
   for (const p of projects) {
-    const option = el('option', null, p.name);
+    // A project can outlive its folder (deleted or moved outside Skadi);
+    // the row says so, so it can be removed here instead of failing silently.
+    const missing = p.exists === false;
+    const option = el('option', null, p.exists === false ? `${p.name}  (folder missing)` : p.name);
     option.value = p.id;
-    option.title = p.path;
+    option.title = missing ? `${p.path} — folder no longer exists` : p.path;
     sel.append(option);
   }
   sel.value = active;
-  sel.title = projects.find((p) => p.id === active)?.path || '';
+  const ap = projects.find((p) => p.id === active); sel.title = ap ? (ap.exists === false ? `${ap.path} — folder no longer exists` : ap.path) : ''; $('btnRemoveProject').disabled = !projects.length;
   updateChromeContext();
   refreshBranch().catch(() => {});
 }
@@ -2925,7 +3028,12 @@ function renderProjects(projects, active) {
 function updateChromeContext() {
   const project = state.projects.find((p) => p.id === state.activeProject);
   const session = state.sessions.find((s) => s.id === state.sessionId);
-  if ($('topbarProject')) $('topbarProject').textContent = project?.name || 'No project';
+  // The server flags a folder that is no longer on disk; say so in the chrome
+  // rather than letting every file tool fail without explanation.
+  if ($('topbarProject')) {
+    $('topbarProject').textContent =
+      (project?.name || 'No project') + (project && project.exists === false ? '  (folder missing)' : '');
+  }
   if ($('topbarSession')) $('topbarSession').textContent = redactCredentials(session?.title || 'New session');
 }
 
@@ -4345,6 +4453,9 @@ async function openSession(id) {
   // left showing the last chat's figures.
   state.changes = session.changes || null;
   acceptPlan(session.plan);
+  state.ledgerLive = null;
+  state.ledgerSaved = session.ledgerState || null;
+  acceptLedger({ ledger: session.ledger });
   renderChatChanges();
   // The browser belongs to the chat: show this one's, not the last one's.
   syncBrowserPane();
@@ -5112,6 +5223,17 @@ function connect() {
   });
 
   es.addEventListener('task_update', () => refreshTasks());
+  es.addEventListener('session_ledger', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.sessionId !== state.sessionId) return;
+    acceptLedger(data);
+  });
+  es.addEventListener('agent_progress', (e) => {
+    const d = JSON.parse(e.data);
+    if (d.sessionId !== state.sessionId || !d.ledger) return;
+    state.ledgerLive = d.ledger;
+    renderLedger();
+  });
   es.addEventListener('session_plan', (e) => {
     const data = JSON.parse(e.data);
     if (data.sessionId !== state.sessionId) return;
@@ -5673,10 +5795,12 @@ function wireToolDock() {
   selectWorkspaceTool = (name) => {
     selectTool(name);
     if (name === 'plan') renderPlan();
+    if (name === 'ledger') renderLedger();
     if (name === 'files') refreshFilesTab();
     if (name === 'review') openChanges();
   };
   for (const tab of tabs) tab.onclick = () => selectWorkspaceTool(tab.dataset.tool);
+  $('ledgerReset').onclick = guard(() => ledgerAction({ reset: true }));
   $('filesRefresh').onclick = () => refreshFilesTab({ force: true });
   $('filesFilter').addEventListener('input', () => {
     clearTimeout(files.timer);
@@ -6034,6 +6158,36 @@ async function reselectAfterRemoval() {
 }
 
 $('btnDeleteProfile').onclick = guard(async () => deleteProfile(state.editing));
+
+$('btnRemoveProject').onclick = guard(() => removeProjectEntry($('projectSelect').value));
+
+/**
+ * Remove the selected project from the list. Only the entry goes: the folder
+ * on disk and the project's chat history are untouched, so nothing is lost.
+ */
+async function removeProjectEntry(id) {
+  const p = state.projects.find((x) => x.id === id);
+  if (!p) return;
+  if (!await askConfirm(
+    `Remove "${p.name}" (${p.path}) from the project list?
+
+The folder and its chat history are not touched.`,
+    { title: 'Remove project' },
+  )) return;
+  const { projects, active } = await api('project/remove', { id });
+  renderProjects(projects, active);
+  leaveSession(null);
+  state.undo = [];
+  state.changes = null;
+  acceptPlan(emptyPlan());
+  renderChatChanges();
+  resetCtx();
+  $('messages').replaceChildren();
+  $('messages').append(createEmptyState());
+  renderOutcomeBar();
+  await refreshLists();
+  await refreshBranch();
+}
 
 
 $('btnDuplicateProfile').onclick = guard(async () => {

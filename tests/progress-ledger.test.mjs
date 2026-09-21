@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   actionFingerprint,
+  applyLedgerOverride,
+  completionGaps,
+  ledgerSnapshot,
+  seedLedger,
   createProgressLedger,
   implementationRequest,
   incompleteCompletion,
@@ -145,4 +149,39 @@ test('the ledger text says an unedited implementation is not complete', () => {
   assert.match(progressLedgerText(ledger), /NOT complete: no deliverable file has been edited/);
   ledger.materialMutations = 1;
   assert.doesNotMatch(progressLedgerText(ledger), /NOT complete/);
+});
+
+test('words like todo in test output or diffs do not raise a rendered-output gap', () => {
+  const ledger = createProgressLedger('Fix the prune bug in edits.');
+  observeToolRound(ledger, [call('run_command', { command: 'git diff' })], [{ ok: true, content: '+ // TODO: tidy this placeholder' }]);
+  assert.deepEqual(completionGaps(ledger), []);
+});
+
+test('a rendered placeholder gap is cleared by a passing verification command', () => {
+  const ledger = createProgressLedger('Fix the page layout.');
+  observeToolRound(ledger, [call('edit_file', { path: 'a.js', old_string: 'x', new_string: 'y' })], [{ ok: true, content: 'ok' }]);
+  observeToolRound(ledger, [call('browser_read', {})], [{ ok: true, content: 'Results will appear here' }]);
+  assert.equal(completionGaps(ledger).length, 1);
+  observeToolRound(ledger, [call('run_command', { command: 'npm test' })], [{ ok: true, content: 'pass 3' }]);
+  assert.deepEqual(completionGaps(ledger), []);
+});
+
+test('user-dismissed gaps stay dismissed and the user note reaches the agent', () => {
+  const ledger = createProgressLedger('Fix the page layout.');
+  observeToolRound(ledger, [call('browser_read', {})], [{ ok: true, content: 'Results will appear here' }]);
+  applyLedgerOverride(ledger, { dismissed: ['(rendered output)'], note: 'Already verified by hand.', phase: 'complete' });
+  assert.deepEqual(completionGaps(ledger), []);
+  observeToolRound(ledger, [call('browser_read', {})], [{ ok: true, content: 'Results will appear here' }]);
+  assert.deepEqual(completionGaps(ledger), []);
+  const text = progressLedgerText(ledger);
+  assert.match(text, /Already verified by hand/);
+  assert.equal(ledger.phase, 'complete');
+});
+
+test('saved counters seed a new run of the same objective only', () => {
+  const first = createProgressLedger('Fix the prune bug in edits.');
+  observeToolRound(first, [call('edit_file', { path: 'a.js', old_string: 'x', new_string: 'y' })], [{ ok: true, content: 'ok' }]);
+  const snapshot = ledgerSnapshot(first);
+  assert.equal(seedLedger(createProgressLedger('Fix the prune bug in edits.'), snapshot).materialMutations, 1);
+  assert.equal(seedLedger(createProgressLedger('Add a dark theme.'), snapshot).materialMutations, 0);
 });

@@ -80,3 +80,29 @@ test('rate limits keep being retried as before', async () => {
   assert.equal(ok, true);
   assert.equal(hits, 2);
 });
+
+test('an abort during the retry backoff settles immediately, without waiting it out', async () => {
+  const fake = fakeProvider([{ status: 429, body: { error: { message: 'slow down' } } }]);
+  const port = await listen(fake.server);
+  const provider = { id: 'test', label: 'Gateway', kind: 'openai', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'k', vision: false };
+  const controller = new AbortController();
+  const started = Date.now();
+  try {
+    // Aborting inside onRetry lands the abort between the loop's own abort
+    // check and the backoff sleep -- the window the sleep guard covers.
+    await streamCompletion(
+      provider,
+      { model: 'm', messages: [{ role: 'user', content: 'hi' }], retry: { attempts: 2, minDelayMs: 3000, maxDelayMs: 3000 } },
+      { onRetry: () => controller.abort() },
+      controller.signal,
+    );
+    assert.fail('the aborted retry should have failed');
+  } catch (err) {
+    const elapsed = Date.now() - started;
+    assert.equal(fake.hits(), 1, 'no second request after the abort');
+    assert.ok(elapsed < 1500, `should not wait out the 3000ms backoff (took ${elapsed}ms)`);
+    assert.ok(err, 'it must reject, not resolve');
+  } finally {
+    fake.server.close();
+  }
+});

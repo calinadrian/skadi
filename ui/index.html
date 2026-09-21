@@ -240,6 +240,7 @@
           <select id="projectSelect" aria-label="Active project"></select>
           <span class="branch" id="branchName" title="Git branch"></span>
           <button id="btnAddProject" class="icon-btn" title="Add a project folder"><svg class="icon"><use href="#i-plus"/></svg></button>
+          <button id="btnRemoveProject" class="icon-btn" title="Remove the selected project from the list (the folder itself is not touched)"><svg class="icon"><use href="#i-trash"/></svg></button>
         </div>
         <button type="button" id="btnCompact" class="btn control-btn" title="Summarise older messages now so the session fits the context window">Compact</button>
         <div class="activity" id="activity" hidden>
@@ -330,6 +331,7 @@
     <nav class="tool-tabs" id="toolTabs" aria-label="Workspace tool">
       <button type="button" class="active" data-tool="tasks" aria-label="Tasks" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg><span>Tasks</span><span class="tool-tab-count" id="taskTabCount" aria-hidden="true" hidden></span></button>
       <button type="button" data-tool="plan" aria-label="Plan" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-list"/></svg><span>Plan</span><span class="tool-tab-count" id="planTabCount" aria-hidden="true" hidden></span></button>
+      <button type="button" data-tool="ledger" aria-label="Ledger" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>Ledger</span><span class="tool-tab-count" id="ledgerTabCount" aria-hidden="true" hidden></span></button>
       <button type="button" data-tool="review" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-diff"/></svg><span>Review</span></button>
       <button type="button" data-tool="files" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>Files</span></button>
       <button type="button" data-tool="ai" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg><span>Local AI</span></button>
@@ -355,6 +357,16 @@
           <span id="planUndoText">Step deleted.</span>
           <button type="button" class="btn tiny" id="planUndoButton">Undo</button>
         </div>
+      </section>
+      <section class="tool-pane ledger-pane" data-tool-pane="ledger" hidden aria-labelledby="ledgerHeading">
+        <header class="plan-head">
+          <div>
+            <h2 id="ledgerHeading">Progress ledger</h2>
+            <p id="ledgerSummary">What the agent is told about its own progress each round.</p>
+          </div>
+          <button type="button" class="btn tiny" id="ledgerReset" title="Clear your corrections and the saved counters">Reset</button>
+        </header>
+        <div id="ledgerBody"></div>
       </section>
       <section class="tool-pane review-pane" data-tool-pane="review" hidden>
         <details class="turn-review" id="turnReview"><summary>Changes by turn</summary><div id="turnReviewList"></div></details>

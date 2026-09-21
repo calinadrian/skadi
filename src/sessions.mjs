@@ -13,8 +13,10 @@ import { readFile, writeFile, readdir, rename, rm, mkdir } from 'node:fs/promise
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { normalisePlan } from './plans.mjs';
+import { normaliseLedgerOverride } from './progress-ledger.mjs';
 
 const id = () => `${new Date().toISOString().replace(/[:.]/g, '-')}-${Math.random().toString(36).slice(2, 7)}`;
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const groupId = () => `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
 // Titles are derived from the first prompt and are shown in several places.
@@ -34,6 +36,8 @@ const normaliseSession = (s) => ({
   unread: Boolean(s.unread),
   groupId: typeof s.groupId === 'string' && s.groupId ? s.groupId : null,
   plan: normalisePlan(s.plan),
+  ledger: normaliseLedgerOverride(s.ledger),
+  ledgerState: s.ledgerState && typeof s.ledgerState === 'object' ? s.ledgerState : null,
 });
 
 export class SessionStore {
@@ -146,8 +150,16 @@ export class SessionStore {
     }
   }
 
+  // Session ids come from id(); anything else -- "../config/providers",
+  // "a/b", a raw filename -- must never be joinable against this dir, or
+  // get/remove would read or delete a sibling JSON file instead of a session.
+  resolveFile(sessionId) {
+    if (typeof sessionId !== 'string' || !ID_RE.test(sessionId)) throw new Error('invalid session id');
+    return join(this.dir, `${sessionId}.json`);
+  }
+
   async get(sessionId) {
-    const file = join(this.dir, `${sessionId}.json`);
+    const file = this.resolveFile(sessionId);
     if (!existsSync(file)) throw new Error(`no session ${sessionId}`);
     return normaliseSession(JSON.parse(await readFile(file, 'utf8')));
   }
@@ -190,7 +202,7 @@ export class SessionStore {
   }
 
   async remove(sessionId) {
-    const file = join(this.dir, `${sessionId}.json`);
+    const file = this.resolveFile(sessionId);
     if (existsSync(file)) await rm(file);
   }
 

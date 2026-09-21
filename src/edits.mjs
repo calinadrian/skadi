@@ -48,17 +48,22 @@ export function recordEdit(session, entry) {
 // Oldest entries go first, by count and by total weight. An entry that is
 // currently undone is kept ahead of an applied one of the same age: dropping it
 // would strand production -- or the workspace -- on a change nothing can put
-// back.
+// back -- so both trims take applied entries first and never touch an undone one.
 function prune(session) {
   const entries = session.undo;
-  while (entries.length > MAX_ENTRIES) entries.shift();
+  while (entries.length > MAX_ENTRIES) {
+    const at = entries.findIndex((e) => !e.undone);
+    if (at === -1) break;
+    entries.splice(at, 1);
+  }
   let total = entries.reduce((sum, e) => sum + size(e.before) + size(e.after), 0);
   for (let i = 0; i < entries.length && total > MAX_HISTORY_BYTES; i++) {
-    if (entries[i].truncated) continue;
-    total -= size(entries[i].before) + size(entries[i].after);
-    entries[i].before = '';
-    entries[i].after = '';
-    entries[i].truncated = true;
+    const entry = entries[i];
+    if (entry.truncated || entry.undone) continue;
+    total -= size(entry.before) + size(entry.after);
+    entry.before = '';
+    entry.after = '';
+    entry.truncated = true;
   }
 }
 

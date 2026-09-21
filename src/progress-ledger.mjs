@@ -31,7 +31,57 @@ const commandVerifies = (command) => {
 const supportArtifact = (path) => /(?:^|[\\/])(?:_?check|probe|scratch|tmp|temp)(?:[._-]|$)/i.test(String(path || ''));
 
 export function completionGaps(ledger) {
-  return [...ledger.artifactGaps.entries()].map(([path, reason]) => `${path}: ${reason}`);
+  // Gaps the user dismissed stay dismissed even if the detector re-raises them.
+  return [...ledger.artifactGaps.entries()]
+    .filter(([path]) => !ledger.dismissed?.has(path))
+    .map(([path, reason]) => `${path}: ${reason}`);
+}
+
+const PHASES = ['locate', 'diagnose', 'implement', 'verify', 'complete'];
+
+/** The user's manual corrections to the ledger; persisted with the session. */
+export function normaliseLedgerOverride(value) {
+  const v = value && typeof value === 'object' ? value : {};
+  return {
+    dismissed: [...new Set((Array.isArray(v.dismissed) ? v.dismissed : []).map((x) => clip(x, 180)).filter(Boolean))].slice(0, 50),
+    phase: PHASES.includes(v.phase) ? v.phase : '',
+    note: clip(v.note, 800),
+  };
+}
+
+export function applyLedgerOverride(ledger, override) {
+  const o = normaliseLedgerOverride(override);
+  ledger.dismissed = new Set(o.dismissed);
+  ledger.note = o.note;
+  ledger.phaseLock = o.phase;
+  if (o.phase) ledger.phase = o.phase;
+  return ledger;
+}
+
+/** Counters worth carrying across turns, compactions and "continue". */
+export function ledgerSnapshot(ledger) {
+  return {
+    request: ledger.request,
+    mutations: ledger.mutations,
+    materialMutations: ledger.materialMutations,
+    verifications: ledger.verifications,
+    phase: ledger.phase,
+    inspected: [...ledger.inspected].slice(-20),
+    gaps: [...ledger.artifactGaps.entries()],
+  };
+}
+
+export function seedLedger(ledger, snapshot) {
+  // Only within the same objective: a new task must start from zero.
+  if (!snapshot || snapshot.request !== ledger.request) return ledger;
+  ledger.mutations = Number(snapshot.mutations) || 0;
+  ledger.materialMutations = Number(snapshot.materialMutations) || 0;
+  ledger.verifications = Number(snapshot.verifications) || 0;
+  if (ledger.materialMutations) ledger.firstMaterialMutationRound = 1;
+  if (PHASES.includes(snapshot.phase)) ledger.phase = snapshot.phase;
+  for (const path of snapshot.inspected || []) ledger.inspected.add(path);
+  for (const [path, reason] of snapshot.gaps || []) ledger.artifactGaps.set(path, reason);
+  return ledger;
 }
 
 const clip = (value, length = 500) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, length);
@@ -147,6 +197,9 @@ export function createProgressLedger(request = '') {
     actions: new Map(),
     loopStrikes: new Map(),
     last: '',
+    dismissed: new Set(),
+    note: '',
+    phaseLock: '',
   };
 }
 
@@ -183,7 +236,7 @@ export function observeToolRound(ledger, calls, results) {
     if (DISCOVERY_TOOLS.has(name)) {
       const target = args?.path || args?.glob || args?.pattern;
       if (target) ledger.inspected.add(clip(target, 180));
-      if (ledger.phase === 'locate') ledger.phase = 'diagnose';
+      if (ledger.phase === 'locate' && !ledger.phaseLock) ledger.phase = 'diagnose';
     }
     if (MUTATION_TOOLS.has(name) && result.ok !== false) {
       ledger.mutations++;
@@ -201,20 +254,24 @@ export function observeToolRound(ledger, calls, results) {
         ledger.materialMutations++;
         if (!ledger.firstMaterialMutationRound) ledger.firstMaterialMutationRound = ledger.rounds;
         ledger.lastMaterialProgressAt = Date.now();
-        ledger.phase = 'verify';
+        ledger.phase = ledger.phaseLock || 'verify';
       }
     }
 
-    const runtimeGap = placeholderReason(result.content);
-    if (runtimeGap && ledger.implementation) ledger.artifactGaps.set('(rendered output)', runtimeGap);
-    else if (VERIFICATION_TOOLS.has(name) && result.ok !== false) ledger.artifactGaps.delete('(rendered output)');
-
+    // Only what the page renders can prove a placeholder is still visible.
+    // Test names, diffs and file reads routinely contain "todo" or
+    // "placeholder" without the deliverable being incomplete.
+    const rendered = VERIFICATION_TOOLS.has(name) && name !== 'task_log';
     const verifies = VERIFICATION_TOOLS.has(name) || (name === 'run_command' && commandVerifies(args?.command));
+    const runtimeGap = rendered ? placeholderReason(result.content) : '';
+    if (runtimeGap && ledger.implementation) ledger.artifactGaps.set('(rendered output)', runtimeGap);
+    else if (verifies && result.ok !== false) ledger.artifactGaps.delete('(rendered output)');
+
     if (verifies && result.ok !== false && ledger.materialMutations > 0) {
       ledger.verifications++;
       verified = true;
       ledger.lastMaterialProgressAt = Date.now();
-      ledger.phase = ledger.artifactGaps.size ? 'implement' : 'complete';
+      ledger.phase = ledger.phaseLock || (completionGaps(ledger).length ? 'implement' : 'complete');
     }
     ledger.last = `${name} ${result.ok === false ? 'failed' : 'completed'}: ${clip(result.content, 260)}`;
   }
@@ -240,8 +297,27 @@ export function progressLedgerText(ledger) {
     `Inspected: ${inspected.length ? inspected.join(', ') : '(none)'}`,
     `Open completion gaps: ${gaps.length ? gaps.join('; ') : '(none detected in edited files)'}${unedited ? ' -- BUT the task is NOT complete: no deliverable file has been edited yet. Research alone does not satisfy the request; make the edits.' : ''}`,
     `Latest result: ${ledger.last || '(none)'}`,
+    ledger.note ? `User correction (overrides anything above): ${ledger.note}` : '',
+    ledger.dismissed?.size ? `The user reviewed and dismissed these gaps as not real: ${[...ledger.dismissed].join(', ')}.` : '',
     ledger.implementation
       ? `Completion contract: locate the responsible code, establish a falsifiable cause, edit it, then run a relevant verification. Syntax-only checks do not prove runtime behavior.${ledger.complexity === 'hard' ? ' A scaffold, empty dataset, placeholder assets, or a stated remaining gap is not completion.' : ''}`
       : 'Completion contract: answer the objective directly and stop when sufficient evidence exists.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
+}
+
+/** What the UI shows: everything in the ledger, including dismissed gaps. */
+export function ledgerView(ledger) {
+  return {
+    request: ledger.request,
+    complexity: ledger.complexity,
+    phase: ledger.phase,
+    rounds: ledger.rounds,
+    edits: ledger.mutations,
+    materialEdits: ledger.materialMutations,
+    verifications: ledger.verifications,
+    inspected: [...ledger.inspected].slice(-12),
+    gaps: [...ledger.artifactGaps.entries()].map(([key, reason]) => ({ key, reason, dismissed: ledger.dismissed.has(key) })),
+    last: ledger.last,
+    snapshot: ledgerSnapshot(ledger),
+  };
 }

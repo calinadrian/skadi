@@ -42,6 +42,7 @@ import { recordEdit, applyOne, applyAll, applyTurn, changeSummary, publicHistory
 const STARTED_AT = Date.now();
 import { Agent, buildSystemPrompt } from './agent.mjs';
 import { applyPlanAction, normalisePlan, planPrompt } from './plans.mjs';
+import { normaliseLedgerOverride } from './progress-ledger.mjs';
 import { resolveContextTokens, estimateTokens } from './compaction.mjs';
 import {
   loadProviders, saveProviders, saveSecret, providerStatus, resolveProvider, listModels, modelLimits,
@@ -49,7 +50,7 @@ import {
 } from './providers.mjs';
 import { progressReviewInput, progressReviewPrompt, parseProgressReview } from './progress-review.mjs';
 import { delegationPrompt, parseDelegation } from './delegation.mjs';
-import { loadProjects, activeProject, addProject, removeProject, selectProject, projectSummary } from './projects.mjs';
+import { loadProjects, activeProject, addProject, removeProject, selectProject, projectSummary, projectsWithStatus } from './projects.mjs';
 import { storeAttachment, attachmentsToBlocks, describeAttachments } from './attachments.mjs';
 import { AgentBrowser, browserTools, SHOTS_DIR, VIEWPORT, profileDirFor } from './browser.mjs';
 
@@ -1975,6 +1976,16 @@ export class Skadi {
       const session = this.liveSession(ctx.sessionId);
       return [planPrompt(session?.plan), session?.requirements ? `Pinned requirements from the user:\n${session.requirements}` : ''].filter(Boolean).join('\n\n');
     };
+    agent.liveLedger = () => {
+      const session = this.liveSession(ctx.sessionId);
+      return { override: session?.ledger, snapshot: session?.ledgerState };
+    };
+    // Keep the counters with the chat so a compaction or "continue" does not
+    // make the next turn believe no work has happened.
+    agent.on('progress', (d) => {
+      const session = this.liveSession(ctx.sessionId);
+      if (session && d.ledger) session.ledgerState = d.ledger.snapshot;
+    });
     self = agent;
     return agent;
   }
@@ -2359,6 +2370,27 @@ export class Skadi {
     return s;
   }
 
+  /** Apply a manual correction to the progress ledger and tell the UI. */
+  async updateSessionLedger(id, patch = {}) {
+    if (!id) throw new Error('session id required');
+    const session = await this.mutateSession(id, (target) => {
+      const cur = normaliseLedgerOverride(target.ledger);
+      if (patch.dismissGap) cur.dismissed.push(String(patch.dismissGap));
+      if (patch.restoreGap) cur.dismissed = cur.dismissed.filter((g) => g !== String(patch.restoreGap));
+      if (patch.phase !== undefined) cur.phase = patch.phase;
+      if (patch.note !== undefined) cur.note = patch.note;
+      target.ledger = normaliseLedgerOverride(cur);
+      if (patch.reset) {
+        target.ledger = normaliseLedgerOverride(null);
+        target.ledgerState = null;
+      }
+    });
+    await this.sessions.save(session);
+    const payload = { ledger: normaliseLedgerOverride(session.ledger), state: session.ledgerState ?? null };
+    this.broadcast('session_ledger', { sessionId: id, ...payload });
+    return payload;
+  }
+
   /** Apply one plan action to the in-flight session object (when present). */
   async updateSessionPlan(id, request, { source = 'user' } = {}) {
     if (!id) throw new Error('session id required');
@@ -2507,7 +2539,7 @@ export class Skadi {
             logs: this.serverLogs.slice(-200),
             providers,
             activeProvider: providersCfg.active,
-            projects: projectsCfg.projects,
+            projects: projectsWithStatus(projectsCfg.projects),
             activeProject: projectsCfg.active,
             workspace: this.workspace,
             // A reloaded window has no idea which turns are mid-flight; this
@@ -2889,16 +2921,16 @@ export class Skadi {
         case 'POST project/add': {
           const { path, name } = await readBody();
           const project = addProject(path, name);
-          return json(200, { project, projects: loadProjects().projects, active: project.id });
+          return json(200, { project: { ...project, exists: true }, projects: projectsWithStatus(loadProjects().projects), active: project.id });
         }
         case 'POST project/select': {
           const { id } = await readBody();
-          return json(200, { project: selectProject(id), workspace: this.workspace });
+          return json(200, { project: projectsWithStatus([selectProject(id)])[0], workspace: this.workspace });
         }
         case 'POST project/remove': {
           const { id } = await readBody();
           const cfg = removeProject(id);
-          return json(200, { projects: cfg.projects, active: cfg.active });
+          return json(200, { projects: projectsWithStatus(cfg.projects), active: cfg.active });
         }
 
         case 'POST terminal/run': {
@@ -3148,6 +3180,17 @@ export class Skadi {
           const { id, ...request } = await readBody();
           if (!id) return json(400, { error: 'id required' });
           return json(200, { plan: await this.updateSessionPlan(id, request, { source: 'user' }) });
+        }
+        case 'GET session/ledger': {
+          const id = url.searchParams.get('id');
+          if (!id) return json(400, { error: 'id required' });
+          const session = this.liveSession(id) ?? await this.sessions.get(id);
+          return json(200, { ledger: normaliseLedgerOverride(session.ledger), state: session.ledgerState ?? null });
+        }
+        case 'POST session/ledger': {
+          const { id, ...patch } = await readBody();
+          if (!id) return json(400, { error: 'id required' });
+          return json(200, await this.updateSessionLedger(id, patch));
         }
         case 'POST group/create': {
           const { name } = await readBody();

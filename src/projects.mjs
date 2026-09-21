@@ -89,6 +89,15 @@ export function selectProject(id) {
   return activeProject(cfg);
 }
 
+/**
+ * The same projects, each flagged with whether its folder is still on disk.
+ * A project can outlive its folder -- the user deletes or moves it outside
+ * Skadi -- and the UI uses this to mark the row and offer a clean-up.
+ */
+export function projectsWithStatus(projects) {
+  return projects.map((p) => ({ ...p, exists: existsSync(p.path) }));
+}
+
 const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.venv', '__pycache__', 'target']);
 
 /**

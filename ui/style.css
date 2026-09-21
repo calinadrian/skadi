@@ -4333,8 +4333,8 @@ label .help:hover { color: var(--text); border-color: var(--text-faint); }
 .review-host .review-head h2 { font-size: 12px; }
 .review-host .review-project { max-width: 110px; }
 .review-host .review-list { min-height: 0; }
-.review-host .review-file-head { min-width: 420px; }
-.review-host .review-file { overflow-x: auto; }
+/* Rows must not force a minimum width in the narrow dock: the head ellipses (its title keeps the full path) and rows keep their natural height, so the list scrolls vertically instead of crushing into slivers. */
+
 
 /* Files remain visible above a file preview. The divider can be dragged, used
    with the arrow keys, or double-clicked to restore a useful default. */
@@ -4407,3 +4407,16 @@ body.resizing-mini-panel, body.resizing-mini-panel * { cursor: row-resize !impor
   .outcome-actions { width: 100%; }
   .outcome-actions .btn { flex: 1; justify-content: center; }
 }
+
+/* progress ledger */
+.ledger-pane.tool-pane { padding: 10px; overflow: auto; }
+.ledger-request { margin: 0 0 10px; font-size: 12px; line-height: 1.45; color: var(--text-faint); max-height: 6em; overflow: auto; }
+.ledger-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+.ledger-hint { color: var(--text-faint); font-size: 11.5px; margin: 6px 0; }
+.ledger-h { margin: 12px 0 6px; font-size: 12px; }
+.ledger-gaps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.ledger-gap { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.4; }
+.ledger-gap > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ledger-gap.dismissed > span { opacity: .55; text-decoration: line-through; }
+.ledger-gap .btn { width: auto; flex: none; }
+.ledger-note { width: 100%; box-sizing: border-box; margin-bottom: 6px; font: inherit; font-size: 12px; }

@@ -928,6 +928,13 @@ function retryPolicy(settings = loadSettings()) {
 function sleep(ms, signal) {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
+    // An abort that landed before we got here has already fired, so its
+    // listener would never fire: settle immediately instead of sleeping out
+    // a backoff the caller has already told us to stop.
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error('aborted'));
+      return;
+    }
     const timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
       resolve();

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { recordEdit, applyOne, applyAll, changeSummary, publicHistory, MAX_IMAGE_BYTES } from '../src/edits.mjs';
+import { recordEdit, applyOne, applyAll, changeSummary, publicHistory, usable, MAX_IMAGE_BYTES, MAX_ENTRIES } from '../src/edits.mjs';
 
 async function workspace() {
   return mkdtemp(join(tmpdir(), 'skadi-edits-'));
@@ -191,4 +191,50 @@ test('the history the window receives carries no file images', async () => {
   const row = publicHistory(session)[0];
   assert.deepEqual(Object.keys(row).sort(), ['added', 'at', 'callId', 'path', 'removed', 'truncated', 'undone']);
   assert.equal(JSON.stringify(row).includes('secret'), false);
+});
+
+test('the entry cap trims applied edits first, never the undone one', async () => {
+  const root = await workspace();
+  try {
+    const session = { undo: [] };
+    await put(root, 'a.txt', 'new');
+    edit(session, 'c1', 'a.txt', 'old', 'new');
+    await applyOne(session, root, 'c1', 'undo');
+    // One entry over the cap: the trim must take an applied entry, because
+    // while c1 is undone its after-image lives nowhere but in that entry.
+    for (let i = 2; i <= 201; i++) edit(session, `c${i}`, 'b.txt', 'x', 'y');
+    assert.equal(session.undo.length, MAX_ENTRIES);
+    assert.equal(session.undo.some((e) => e.callId === 'c1'), true);
+    assert.equal(session.undo.some((e) => e.callId === 'c2'), false);
+    // The undone edit must still be put back: its images survived the trim.
+    assert.equal(usable(session.undo[0]), true);
+    await assert.doesNotReject(applyOne(session, root, 'c1', 'redo'));
+    assert.equal(await read(root, 'a.txt'), 'new');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the weight cap truncates applied edits first, never the undone one', async () => {
+  const root = await workspace();
+  try {
+    const session = { undo: [] };
+    const mb = 1024 * 1024;
+    const full = 'A'.repeat(mb); // at the per-image cap, so both images are kept
+    await put(root, 'a.txt', full);
+    edit(session, 'c1', 'a.txt', full, full);
+    await applyOne(session, root, 'c1', 'undo');
+    // Two applied entries at 2 MB each push the total to 6 MB, over the
+    // 4 MB cap: the weight loop must burn applied weight first.
+    const big = 'B'.repeat(mb);
+    for (let i = 2; i <= 3; i++) edit(session, `c${i}`, `big${i}.txt`, big, big);
+    const c1 = session.undo.find((e) => e.callId === 'c1');
+    assert.equal(c1.truncated, false);
+    assert.ok(session.undo.reduce((s, e) => s + e.before.length + e.after.length, 0) <= 4 * 1024 * 1024);
+    // Redo still works: c1's after-image is exactly what it writes back.
+    await assert.doesNotReject(applyOne(session, root, 'c1', 'redo'));
+    assert.equal((await read(root, 'a.txt')).length, mb);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

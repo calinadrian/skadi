@@ -2,7 +2,8 @@
 // allowed to lose. Every test here stands for a way chats used to disappear.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -555,4 +556,32 @@ test('narrow split panes contain live status text and unlimited turns have no fa
   assert.match(js, /d\.maxRounds > 0 \? `step \$\{d\.round\} of \$\{d\.maxRounds\}` : `step \$\{d\.round\}`/);
   assert.match(css, /@container \(max-width: 700px\)[\s\S]*?\.composer-controls \{ flex-wrap: wrap; overflow: hidden; \}/);
   assert.match(css, /\.composer-controls \.activity span:last-child[\s\S]*?text-overflow: ellipsis;/);
+});
+
+// ---------------------------------------------------------- id validation --
+
+test('session ids cannot traverse outside the session dir', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'skadi-trav-'));
+  try {
+    const sessionsDir = join(base, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const store = new SessionStore(sessionsDir);
+    // The file the traversal used to reach: one level up, out of sessions/.
+    await mkdir(join(base, 'config'), { recursive: true });
+    const victim = join(base, 'config', 'providers.json');
+    await writeFile(victim, JSON.stringify({ providers: { openai: { apiKey: 'sk-test' } } }), 'utf8');
+
+    // The two routes the guard must cover: the read and the delete.
+    await assert.rejects(store.get('../config/providers'), /invalid session id/);
+    await assert.rejects(store.remove('../config/providers'), /invalid session id/);
+    assert.ok(existsSync(victim), 'sibling file must survive the attempted delete');
+
+    // Normal ids keep working end to end.
+    const session = await store.create('Guard test', 'dev');
+    assert.equal((await store.get(session.id)).title, 'Guard test');
+    await store.remove(session.id);
+    await assert.rejects(store.get(session.id), /no session/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
