@@ -22,7 +22,8 @@ import { TaskManager } from './tasks.mjs';
 import { gitStatus, gitDiff } from './git.mjs';
 import { SkillStore, skillTools, skillCatalogue, seedBundledSkills } from './skills.mjs';
 import { MemoryStore, memoryTools } from './memory.mjs';
-import { SessionStore } from './sessions.mjs';
+import { SessionStore, redactCredentials } from './sessions.mjs';
+import { searchSession, contextDetails, turnReview, recordCommand } from './workflow.mjs';
 import { topicTitle, modelTitle } from './titles.mjs';
 import { checkForUpdate, applyUpdate, installedVersion } from './update.mjs';
 
@@ -32,7 +33,7 @@ import { checkForUpdate, applyUpdate, installedVersion } from './update.mjs';
 const deploy = await import('./publish.mjs').catch(() => null);
 const canPublish = () => Boolean(deploy?.canPublish());
 const canFetch = () => Boolean(deploy?.canFetch());
-import { recordEdit, applyOne, applyAll, changeSummary, publicHistory } from './edits.mjs';
+import { recordEdit, applyOne, applyAll, applyTurn, changeSummary, publicHistory } from './edits.mjs';
 
 // When this process loaded its code. A source file newer than this is a
 // change the running server is not executing: the window is served from
@@ -321,7 +322,7 @@ export class Skadi {
     // inside an already-running parent. Track them separately so reconnect,
     // Stop, deletion, and settings changes can still reach them.
     this.subagents = new Map();
-    this.tasks = new TaskManager();
+    this.tasks = new TaskManager({ file: join(ROOT, 'logs', 'tasks.json') });
     this.tasks.on('update', (t) => this.broadcast('task_update', { task: t }));
     this.tasks.on('done', (t) => {
       this.onTaskDone(t).catch((err) => console.error('[task]', err.message));
@@ -1970,7 +1971,10 @@ export class Skadi {
     // The turn stamps per-session tool context here; tool closures read it
     // lazily so background tasks and edit records land in the right session.
     agent.toolCtx = ctx;
-    agent.liveGuidance = () => planPrompt(this.liveSession(ctx.sessionId)?.plan);
+    agent.liveGuidance = () => {
+      const session = this.liveSession(ctx.sessionId);
+      return [planPrompt(session?.plan), session?.requirements ? `Pinned requirements from the user:\n${session.requirements}` : ''].filter(Boolean).join('\n\n');
+    };
     self = agent;
     return agent;
   }
@@ -2020,6 +2024,9 @@ export class Skadi {
   }
 
   async chat(sessionId, text, uploads = [], opts = {}) {
+    const systemMessage = typeof opts.systemMessage === 'string' && opts.systemMessage.trim()
+      ? opts.systemMessage.trim()
+      : '';
     // What the composer picked wins; a caller that names nothing gets what the
     // chat used last, then the default.
     const stored = opts.provider || !sessionId
@@ -2057,11 +2064,12 @@ export class Skadi {
     // building it, so a steer that lost the race would file every attachment
     // twice -- once here and once again on the new turn below.
     if (live?.agent.running) {
-      const content = this.userContent(live.session, text, uploads, provider);
+      const content = systemMessage || this.userContent(live.session, text, uploads, provider);
       // Hand it to the agent instead of pushing it onto the transcript here:
-      // only the run loop knows when a user message is legal, and it keeps
-      // the turn going so the model answers mid-flight rather than after.
-      if (live.agent.steer(content)) return live.session;
+      // only the run loop knows when a message is legal, and it keeps the turn
+      // going so the model answers mid-flight rather than after. Harness
+      // notifications stay system-authored instead of looking user-authored.
+      if (live.agent.steer(content, { role: systemMessage ? 'system' : 'user' })) return live.session;
       // The turn ended while the message was in flight; fall through and
       // start a new one on the same session.
     }
@@ -2133,7 +2141,13 @@ export class Skadi {
     session.subagents = opts.subagents == null
       ? (session.subagents ?? this.settings.autoSubagents !== false)
       : opts.subagents !== false;
-    this.appendUserMessage(session, text, uploads, provider);
+    if (systemMessage) session.messages.push({ role: 'system', content: systemMessage });
+    else this.appendUserMessage(session, text, uploads, provider);
+
+    const workTurn = { id: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: redactCredentials(text || systemMessage || 'Continue task').slice(0, 100), startedAt: Date.now(), status: 'running', commands: [] };
+    session.workTurns ??= [];
+    session.workTurns.push(workTurn);
 
     // Persist the turn before the run starts: if the app restarts, crashes
     // or is closed mid-turn, the user's message is already on disk and the
@@ -2149,7 +2163,7 @@ export class Skadi {
     // tool chatter out of its context and leaving edits/verification under the
     // parent agent's control.
     try {
-      const delegation = session.subagents && typeof this.planDelegation === 'function'
+      const delegation = !systemMessage && session.subagents && typeof this.planDelegation === 'function'
         ? await this.planDelegation(provider, model, text)
         : null;
       if (delegation?.delegate && delegation.task) {
@@ -2181,8 +2195,14 @@ export class Skadi {
     // edits push undo snapshots here (capped; before-images clipped). They
     // ride along in the session file so Undo survives a restart.
     agent.toolCtx.sessionId = session.id;
+    agent.on('tool_call', (call) => {
+      if (call.name === 'run_command') workTurn.commands.push({ id: call.id, command: redactCredentials(call.args?.command || ''), status: 'running', exitCode: null });
+    });
+    agent.on('tool_result', (result) => recordCommand(workTurn, result));
+    agent.on('done', (result) => { workTurn.outcome = result; workTurn.status = result.incomplete || result.truncated ? 'incomplete' : 'finished'; });
     agent.toolCtx.recordEdit = (entry) => {
-      recordEdit(session, entry);
+      workTurn.editCount = (workTurn.editCount || 0) + 1;
+      recordEdit(session, { ...entry, turnId: workTurn.id });
       // The bar above the chat counts this turn's edits as they land.
       this.broadcast('edits', { sessionId: session.id, ...changeSummary(session), history: publicHistory(session) });
     };
@@ -2244,9 +2264,11 @@ export class Skadi {
     try {
       await agent.run(session.messages, { sampling });
     } finally {
+      workTurn.finishedAt = Date.now();
+      if (workTurn.status === 'running') workTurn.status = 'interrupted';
       if (compactions.length) session.compactions = [...(session.compactions || []), ...compactions];
       // Once per chat, and about its first message: a later turn must not rename it.
-      const askTitle = session.titleAuto && !session.titleAsked;
+      const askTitle = !systemMessage && session.titleAuto && !session.titleAsked;
       if (askTitle) session.titleAsked = true;
       if (!turn.deleted) await this.sessions.save(session);
       if (this.turns.get(session.id) === turn) this.turns.delete(session.id);
@@ -2359,23 +2381,42 @@ export class Skadi {
 
   /** A background task finished: land its result in the session transcript. */
   async onTaskDone(task) {
+    // The panel/toast should update immediately; a resumed model turn can take
+    // minutes and must not delay the completion signal.
+    this.broadcast('task_done', { task });
     if (task.sessionId) {
       const secs = Math.max(0, Math.round(((task.finishedAt ?? Date.now()) - task.startedAt) / 1000));
       const dur = secs >= 60 ? `${Math.floor(secs / 60)}m${secs % 60}s` : `${secs}s`;
       const note =
-        `[background task] \`${task.command}\` finished with exit code ${task.exitCode} after ${dur}.\n` +
-        `${(task.tail || '').trim() || '(no output)'}`;
+        `[Automatic background task completion]\n` +
+        `The background command \`${task.command}\` finished with exit code ${task.exitCode} after ${dur}.\n` +
+        `${(task.tail || '').trim() || '(no output)'}\n\n` +
+        `Continue the original work now. Inspect this result, run the next required analysis or verification, update the execution plan, and finish the requested deliverable. Do not wait for another user message.`;
       try {
-        // Into the live transcript when that session has a running turn, so
-        // the model picks it up next round; otherwise appended to the file.
-        await this.mutateSession(task.sessionId, (s) => {
-          s.messages.push({ role: 'user', content: note });
+        // A live turn receives a system steer at its next legal boundary. If
+        // it already ended, start a continuation turn automatically: saying
+        // "I'll continue when this finishes" must actually continue.
+        const live = this.turns.get(task.sessionId);
+        if (live?.agent?.running && live.agent.steer(note, { role: 'system' })) return;
+        await this.chat(task.sessionId, '', [], { systemMessage: note });
+      } catch (err) {
+        // Keep the evidence when the model is unavailable. The next manual
+        // turn receives it without a fake user bubble.
+        try {
+          await this.mutateSession(task.sessionId, (s) => {
+            const duplicate = s.messages.some((m) => m.role === 'system' && m.content === note);
+            if (!duplicate) s.messages.push({ role: 'system', content: note });
+          });
+        } catch {
+          /* session deleted mid-task; the panel still shows the output */
+        }
+        this.broadcast('task_resume_failed', {
+          taskId: task.id,
+          sessionId: task.sessionId,
+          error: err.message,
         });
-      } catch {
-        /* session deleted mid-task; the panel still shows the output */
       }
     }
-    this.broadcast('task_done', { task });
   }
 
   // ------------------------------------------------------------------ routes
@@ -2997,6 +3038,55 @@ export class Skadi {
           } catch (err) {
             return json(404, { error: err.message });
           }
+        case 'GET sessions/search': {
+          const query = (url.searchParams.get('q') || '').slice(0, 200);
+          if (!query.trim()) return json(200, []);
+          const matches = [];
+          for (const row of await this.sessions.list()) {
+            const session = this.liveSession(row.id) || await this.sessions.get(row.id).catch(() => null);
+            const match = session && searchSession(session, query);
+            if (match) matches.push({ ...row, match });
+            if (matches.length >= 100) break;
+          }
+          return json(200, matches);
+        }
+        case 'GET session/workflow': {
+          const id = url.searchParams.get('id');
+          const session = this.liveSession(id) || await this.sessions.get(id);
+          const turns = turnReview(session, this.tasks.list());
+          if (!this.isSessionWorking(id)) for (const turn of turns) if (turn.status === 'running') turn.status = 'interrupted';
+          return json(200, { context: contextDetails(session), turns });
+        }
+        case 'POST session/requirements': {
+          const { id, requirements } = await readBody();
+          if (typeof requirements !== 'string' || requirements.length > 8000) return json(400, { error: 'Requirements must be text, up to 8000 characters.' });
+          await this.mutateSession(id, (s) => { s.requirements = requirements; });
+          return json(200, { ok: true });
+        }
+        case 'POST session/checkpoint/restore': {
+          const { id, turnId, direction, confirm } = await readBody();
+          if (!['undo', 'redo'].includes(direction) || confirm !== 'RESTORE CHECKPOINT') return json(400, { error: 'Checkpoint confirmation required.' });
+          // File restores require a quiet workspace, including background commands.
+          if (this.turns.size || this.tasks.list().some(t => ['running', 'interrupted'].includes(t.status))) return json(409, { error: 'Finish running work and review recovered tasks before restoring a checkpoint.' });
+          let result;
+          await this.mutateSession(id, async s => {
+            if (!s.projectId) throw new Error('This chat has no project; its checkpoint cannot be safely restored.');
+            const project = this.reviewProject(s.projectId);
+            result = await applyTurn(s, project.path, turnId, direction);
+            s.messages.push({ role: 'user', content: `[Checkpoint ${direction === 'undo' ? 'reverted' : 'reapplied'}: ${turnId}] Files: ${result.paths.join(', ')}. Continue from the current files.` });
+          });
+          return json(200, { ok: true, ...result });
+        }
+        case 'POST session/checkpoint': {
+          const { id, turnId, name } = await readBody();
+          if (typeof name !== 'string' || !name.trim() || name.length > 100) return json(400, { error: 'Use a checkpoint name of 1–100 characters.' });
+          await this.mutateSession(id, (s) => {
+            const turn = s.workTurns?.find(t => t.id === turnId);
+            if (!turn) throw new Error('Turn not found');
+            turn.name = redactCredentials(name.trim());
+          });
+          return json(200, { ok: true });
+        }
         case 'GET sessions': {
           // scope=all hands back every project's chats. The rail shows the
           // active project's own, but a chat filed elsewhere -- one still

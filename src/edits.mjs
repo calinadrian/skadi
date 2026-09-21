@@ -30,6 +30,7 @@ export function recordEdit(session, entry) {
   session.undo ??= [];
   session.undo.push({
     callId: entry.callId ?? null,
+    turnId: entry.turnId ?? null,
     path: entry.path,
     before: truncated ? '' : before,
     after: truncated ? '' : after,
@@ -140,6 +141,33 @@ export async function applyAll(session, workspace, direction) {
     throw new Error(`${direction === 'undo' ? 'Revert' : 'Reapply'} failed: ${err.message}. Every file was put back as it was.`);
   }
   return { count: touched.length, paths: [...new Set(touched.map((e) => e.path))] };
+}
+
+// A checkpoint only moves its own edits and refuses to overwrite later work.
+export async function applyTurn(session, workspace, turnId, direction) {
+  const entries = (session.undo || []).filter(e => e.turnId === turnId);
+  if (!entries.length) throw new Error('No retained edits for this checkpoint.');
+  const expected = session.workTurns?.find(t => t.id === turnId)?.editCount;
+  if (expected != null && expected !== entries.length) throw new Error('Some checkpoint snapshots have expired. Nothing was changed.');
+  const wanted = entries.filter(e => direction === 'undo' ? !e.undone : e.undone);
+  if (!wanted.length) throw new Error('This checkpoint is already in that state.');
+  const paths = [...new Set(wanted.map(e => e.path))];
+  for (const path of paths) {
+    const chain = (session.undo || []).filter(e => e.path === path);
+    const own = chain.filter(e => e.turnId === turnId);
+    const lastIndex = chain.indexOf(own.at(-1));
+    if (chain.slice(lastIndex + 1).some(e => !e.undone)) throw new Error(`Later edits exist for ${path}. Revert those first.`);
+    if (own.some(e => e.truncated)) throw new Error(`Snapshot unavailable for ${path}.`);
+    if (own.some(e => e.undone !== own[0].undone)) throw new Error(`Some edits for ${path} were moved individually. Review them in the chat first.`);
+    const boundary = direction === 'undo' ? own.at(-1) : own[0];
+    const file = safePath(workspace, path);
+    const exists = existsSync(file);
+    const expectedExists = direction === 'undo' || boundary.existed !== false;
+    if (exists !== expectedExists || (exists && await readFile(file, 'utf8') !== (direction === 'undo' ? boundary.after : boundary.before))) {
+      throw new Error(`${path} has changed outside this checkpoint. Nothing was overwritten.`);
+    }
+  }
+  return applyAll({ undo: entries }, workspace, direction);
 }
 
 // The figures behind the bar above a chat: what its edits currently add up to,

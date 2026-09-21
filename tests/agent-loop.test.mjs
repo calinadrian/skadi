@@ -4,6 +4,21 @@ import { createServer } from 'node:http';
 
 import { Agent } from '../src/agent.mjs';
 
+test('automatic steers retain their system role', async () => {
+  const agent = new Agent({
+    provider: { id: 'fake', kind: 'openai', baseUrl: 'http://127.0.0.1', apiKey: 'k' },
+    model: 'm',
+    tools: {},
+    schemas: [],
+    settings: {},
+  });
+  const messages = [];
+  agent.running = true;
+  assert.equal(agent.steer('background task finished', { role: 'system' }), true);
+  await agent._drainSteers(messages);
+  assert.deepEqual(messages, [{ role: 'system', content: 'background task finished' }]);
+});
+
 async function loopingModel() {
   let requests = 0;
   const bodies = [];
@@ -162,12 +177,16 @@ test('implementation work is forced from discovery into an edit', async () => {
         compaction: { auto: false },
       },
     });
+    const roundEvents = [];
+    agent.on('round', (event) => roundEvents.push(event));
     const messages = [{ role: 'user', content: 'fix the broken button' }];
     await agent.run(messages);
     assert.equal(requests, 6);
     assert.deepEqual(bodies[3].tools.map((tool) => tool.function.name), ['edit_file', 'write_file']);
     assert.match(bodies[3].messages.at(-1).content, /discovery tools are now unavailable/i);
     assert.equal(messages.at(-1).content, 'implemented and verified');
+    assert.equal(roundEvents.every((event) => event.maxRounds === 0), true,
+      'unlimited turns must not display a finite denominator after editing');
   } finally {
     server.close();
   }

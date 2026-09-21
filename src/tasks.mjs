@@ -1,13 +1,15 @@
 // Background tasks: long builds and test suites the model starts with
 // run_command background:true. The turn continues (or ends) while the process
 // runs; output streams to the UI panel via throttled events, and completion
-// lands in the session transcript so the model picks it up next round.
+// resumes the owning chat with an internal system event.
 //
-// Tasks live in memory only. A harness restart orphans the child process and
-// drops the registry -- task_log then says so honestly instead of hanging.
+// Persist bounded output and metadata. Restart recovery never assumes ownership
+// of a PID or reruns commands: the user can inspect the log and continue safely.
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { redactCredentials } from './sessions.mjs';
 import { ToolError } from './tools.mjs';
 
 const MAX_KEPT_CHARS = 192 * 1024;
@@ -16,9 +18,38 @@ const UPDATE_THROTTLE_MS = 800;
 let seq = 0;
 
 export class TaskManager extends EventEmitter {
-  constructor() {
+  constructor({ file = null, probe = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } } } = {}) {
     super();
     this.tasks = new Map();
+    this.file = file;
+    this.persistenceError = null;
+    if (file) {
+      try {
+        for (const saved of JSON.parse(readFileSync(file, 'utf8'))) {
+          if (!saved.id || typeof saved.command !== 'string') continue;
+          const task = { ...saved, proc: null, lastEmit: 0 };
+          if (task.status === 'running' || task.status === 'interrupted') {
+            task.status = 'interrupted';
+            task.recovery = task.pid && probe(task.pid)
+              ? 'A process with the saved PID is still present. Ownership and exit status are unverified; inspect it before running this command again.'
+              : 'The original process is no longer present. Its exit status is unknown. Review the saved output before continuing.';
+          }
+          this.tasks.set(task.id, task);
+        }
+      } catch (err) { if (err.code !== 'ENOENT') this.persistenceError = err.message; }
+    }
+  }
+
+  persist() {
+    if (!this.file) return;
+    try {
+      mkdirSync(dirname(this.file), { recursive: true });
+      const rows = [...this.tasks.values()].map(({ proc, lastEmit, ...t }) => ({ ...t,
+        command: redactCredentials(t.command), output: redactCredentials(t.output) }));
+      writeFileSync(`${this.file}.tmp`, JSON.stringify(rows));
+      renameSync(`${this.file}.tmp`, this.file);
+      this.persistenceError = null;
+    } catch (err) { this.persistenceError = err.message; console.error('[tasks] Could not save task history:', err.message); }
   }
 
   start({ command, shell, sessionId = null, cwd }) {
@@ -35,6 +66,7 @@ export class TaskManager extends EventEmitter {
       command: String(command),
       shell: isCmd ? 'cmd' : 'powershell',
       sessionId,
+      cwd: resolve(cwd),
       status: 'running',
       output: '',
       truncated: false,
@@ -52,7 +84,9 @@ export class TaskManager extends EventEmitter {
       throw new ToolError(`failed to start: ${err.message}`);
     }
     task.proc = child;
+    task.pid = child.pid ?? null;
     this.tasks.set(id, task);
+    this.persist();
 
     const append = (d) => {
       task.output += d;
@@ -63,6 +97,7 @@ export class TaskManager extends EventEmitter {
       const now = Date.now();
       if (now - task.lastEmit > UPDATE_THROTTLE_MS) {
         task.lastEmit = now;
+        this.persist();
         this.emit('update', this.summarize(task));
       }
     };
@@ -86,6 +121,7 @@ export class TaskManager extends EventEmitter {
     task.exitCode = code;
     task.finishedAt = Date.now();
     task.proc = null;
+    this.persist();
     this.emit('update', this.summarize(task));
     this.emit('done', this.summarize(task));
     return task;
@@ -112,14 +148,14 @@ export class TaskManager extends EventEmitter {
     const head = `Task ${task.id} [${task.status}] ${task.command}\n` +
       (task.status === 'running'
         ? `Running for ${Math.round((Date.now() - task.startedAt) / 1000)}s.`
-        : `Finished with exit code ${task.exitCode}.`);
-    return `${head}\n${tail.trim() || '(no output yet)'}`;
+        : task.status === 'interrupted' ? task.recovery : `Finished with exit code ${task.exitCode}.`);
+    return redactCredentials(`${head}\n${tail.trim() || '(no output yet)'}`);
   }
 
   summarize(task) {
     return {
       id: task.id,
-      command: task.command,
+      command: redactCredentials(task.command),
       shell: task.shell,
       sessionId: task.sessionId,
       status: task.status,
@@ -127,7 +163,9 @@ export class TaskManager extends EventEmitter {
       startedAt: task.startedAt,
       finishedAt: task.finishedAt,
       truncated: task.truncated,
-      tail: task.output.slice(-2000),
+      recovery: task.recovery || null,
+      persistenceError: this.persistenceError,
+      tail: redactCredentials(task.output.slice(-2000)),
     };
   }
 
@@ -146,6 +184,7 @@ export class TaskManager extends EventEmitter {
         n++;
       }
     }
+    this.persist();
     return n;
   }
 }

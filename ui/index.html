@@ -91,6 +91,7 @@
 
   <button id="btnSettings" class="icon-btn" title="Settings" aria-label="Settings"><svg class="icon"><use href="#i-sliders"/></svg></button>
 
+  <button id="btnPalette" class="btn tiny" title="Commands (Ctrl+K)">Commands <kbd>Ctrl K</kbd></button>
   <div class="window-controls" id="windowControls" hidden>
     <button class="wc" id="wcMin" title="Minimize" aria-label="Minimize"><svg class="wc-glyph"><use href="#i-win-min"/></svg></button>
     <button class="wc" id="wcMax" title="Maximize" aria-label="Maximize"><svg class="wc-glyph"><use href="#i-win-max"/></svg></button>
@@ -246,7 +247,7 @@
           <span id="activityText">Working…</span>
         </div>
         <span class="hint" id="roundInfo"></span>
-        <span class="hint" id="ctxInfo" title="Estimated context used in this session"></span>
+        <button type="button" class="hint context-button" id="ctxInfo" title="Inspect context and pinned requirements">Context</button>
         <button type="button" id="taskPill" class="task-pill" hidden></button>
         <span class="kbd-hint"><kbd>Enter</kbd> send <span aria-hidden="true">·</span> <kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
       </div>
@@ -356,6 +357,7 @@
         </div>
       </section>
       <section class="tool-pane review-pane" data-tool-pane="review" hidden>
+        <details class="turn-review" id="turnReview"><summary>Changes by turn</summary><div id="turnReviewList"></div></details>
         <div class="embedded-host review-host" id="reviewHost"></div>
       </section>
       <section class="tool-pane files-pane" data-tool-pane="files" hidden>
@@ -712,6 +714,21 @@
 </div>
 
 <div class="toast" id="toast" hidden></div>
+<dialog id="commandDialog" class="workflow-dialog" aria-labelledby="commandHeading">
+ <header><h2 id="commandHeading">Commands</h2><button type="button" class="btn tiny" data-close-dialog>Close</button></header>
+ <input id="commandQuery" type="search" placeholder="Search actions, chats, projects…" aria-label="Search commands" autocomplete="off">
+ <div id="commandResults" class="command-results"></div>
+</dialog>
+<dialog id="contextDialog" class="workflow-dialog" aria-labelledby="contextHeading">
+ <header><h2 id="contextHeading">Context</h2><button type="button" class="btn tiny" data-close-dialog>Close</button></header>
+ <p class="hint">Estimated tokens in saved model context. Images are estimated separately; file text counts with its message. Live instructions and provider overhead may add tokens.</p>
+ <div id="contextBuckets" class="context-buckets"></div>
+ <label for="pinnedRequirements">Pinned requirements for this chat</label>
+ <textarea id="pinnedRequirements" rows="5" maxlength="8000" placeholder="Requirements to keep available after compaction"></textarea>
+ <button type="button" class="btn" id="saveRequirements">Save requirements</button>
+ <p id="requirementsStatus" role="status"></p>
+ <details><summary>Compaction summary</summary><pre id="contextSummary"></pre></details>
+</dialog>
 
 <script type="module" src="app.js"></script>
 </body>

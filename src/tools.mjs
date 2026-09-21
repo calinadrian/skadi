@@ -421,7 +421,7 @@ export function buildTools(ctx) {
         description:
           'Run a shell command in the workspace and return its output. Use for builds, tests and git. Not for editing files. ' +
           'Pass background:true for long builds or test suites: the task keeps running after this turn, its output streams ' +
-          'to the Background tasks panel, and a note with the result lands in the session when it finishes. Use task_log ' +
+          'to the Background tasks panel, and completion resumes the owning chat with a system event. Use task_log ' +
           'to check on it and task_stop to kill it.',
         parameters: {
           type: 'object',
@@ -450,7 +450,7 @@ export function buildTools(ctx) {
           return (
             `Started background task ${task.id}: ${command}\n` +
             `It keeps running while you continue. Read its output anytime with task_log (task_id "${task.id}"); ` +
-            `its result lands in this session when it finishes.`
+            `when it finishes, its result is delivered to this chat and the agent resumes automatically.`
           );
         }
         const timeoutSec = ctx.settings.commandTimeoutSec ?? 120;

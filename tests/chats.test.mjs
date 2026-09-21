@@ -245,6 +245,8 @@ function harness(store, run) {
     chat: Skadi.prototype.chat,
     userContent: Skadi.prototype.userContent,
     appendUserMessage: Skadi.prototype.appendUserMessage,
+    mutateSession: Skadi.prototype.mutateSession,
+    onTaskDone: Skadi.prototype.onTaskDone,
     // Naming a new chat asks the model; a test double records the ask instead.
     refineTitle(id, provider, model, text) { titled.push({ id, text }); },
   };
@@ -503,6 +505,35 @@ test('a new chat is named for its topic at once, and the model is asked to do be
   });
 });
 
+test('a finished background task resumes its chat as a system event', async () => {
+  await withStore(async (store) => {
+    const runs = [];
+    const h = harness(store, async (messages) => {
+      runs.push(messages.map((message) => ({ role: message.role, content: message.content })));
+    });
+    h.skadi.makeAgent = h.makeAgent;
+    const session = await h.skadi.chat(null, 'scrape the dataset and analyse it');
+
+    await h.skadi.onTaskDone({
+      id: 'task-1',
+      sessionId: session.id,
+      command: 'node scrape.mjs',
+      exitCode: 0,
+      startedAt: 1_000,
+      finishedAt: 3_000,
+      tail: '50 players complete',
+    });
+
+    assert.equal(runs.length, 2, 'completion starts a continuation turn');
+    const resumed = runs[1];
+    assert.equal(resumed.at(-1).role, 'system');
+    assert.match(resumed.at(-1).content, /Continue the original work now/);
+    assert.equal(resumed.filter((message) => message.role === 'user').length, 1,
+      'the automatic completion must not appear as another user message');
+    assert.equal(h.events.some((event) => event.type === 'task_done'), true);
+  });
+});
+
 test('running chats show their working mark beside the title without hiding unread state', async () => {
   const [js, css] = await Promise.all([
     readFile(new URL('../ui/app.js', import.meta.url), 'utf8'),
@@ -514,4 +545,14 @@ test('running chats show their working mark beside the title without hiding unre
   assert.match(js, /mark\.title = 'Working'/);
   assert.match(css, /\.chat-running-mark\s*{/);
   assert.match(css, /\.chat-row\.running \.chat-sub/);
+});
+
+test('narrow split panes contain live status text and unlimited turns have no fake denominator', async () => {
+  const [js, css] = await Promise.all([
+    readFile(new URL('../ui/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../ui/style.css', import.meta.url), 'utf8'),
+  ]);
+  assert.match(js, /d\.maxRounds > 0 \? `step \$\{d\.round\} of \$\{d\.maxRounds\}` : `step \$\{d\.round\}`/);
+  assert.match(css, /@container \(max-width: 700px\)[\s\S]*?\.composer-controls \{ flex-wrap: wrap; overflow: hidden; \}/);
+  assert.match(css, /\.composer-controls \.activity span:last-child[\s\S]*?text-overflow: ellipsis;/);
 });

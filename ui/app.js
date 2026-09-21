@@ -369,6 +369,7 @@ function renderOutcomeBar() {
     : 'Inspect the result before continuing';
   bar.classList.toggle('incomplete', incomplete);
   bar.hidden = isBusy() || !state.sessionId || !hasAnswer;
+  renderWorkflowOutcome();
 }
 
 function setActivity(text) {
@@ -1680,6 +1681,7 @@ async function refreshTasks() {
   }
   renderTasks();
   renderTaskPill();
+  renderWorkflowOutcome();
 }
 
 function taskCard(t) {
@@ -1708,10 +1710,27 @@ function taskCard(t) {
     meta.append(elapsed, el('span', null, t.shell === 'cmd' ? 'cmd' : 'pwsh'));
   } else {
     meta.append(el('span', t.exitCode === 0 ? 'task-ok' : 'task-bad',
-      t.exitCode === 0 ? 'Completed' : (t.exitCode == null ? 'Stopped' : `exit ${t.exitCode}`)));
+      t.status === 'interrupted' ? 'Recovery needed' : t.exitCode === 0 ? 'Completed' : (t.exitCode == null ? 'Stopped' : `exit ${t.exitCode}`)));
     meta.append(el('span', null, fmtDur((t.finishedAt ?? t.startedAt) - t.startedAt)));
   }
   card.append(meta);
+  if (t.recovery) {
+    card.append(el('p', 'task-recovery', t.recovery));
+    if (t.sessionId) {
+      const resume = el('button', 'btn tiny', 'Review in chat');
+      resume.onclick = guard(async () => { const s = sessionById(t.sessionId); if (s) await openElsewhere(s); else await openSession(t.sessionId); });
+      card.append(resume);
+    }
+  }
+  if (t.persistenceError) card.append(el('p', 'task-recovery', 'Task history could not be saved. Check disk access.'));
+  const log = el('button', 'btn tiny', 'Show saved log');
+  log.onclick = guard(async () => {
+    const result = await api(`task/log?id=${encodeURIComponent(t.id)}&max=196608`);
+    let pre = card.querySelector('.task-full-log');
+    if (!pre) { pre = el('pre', 'task-full-log'); card.append(pre); }
+    pre.textContent = redactCredentials(result.log);
+  });
+  card.append(log);
 
   const tail = (t.tail || '').trim();
   if (tail) {
@@ -3744,7 +3763,7 @@ function matchesChatFilter(s) {
   if (state.chatFilter === 'unread' && !s.unread) return false;
   if (state.chatFilter === 'archived' && !s.archived) return false;
   if (state.chatFilter === 'all' && s.archived) return false;
-  if (q && !String(s.title || '').toLowerCase().includes(q)) return false;
+  if (q && !String(s.title || '').toLowerCase().includes(q) && !state.searchResults?.some(r => r.id === s.id)) return false;
   return true;
 }
 
@@ -3826,6 +3845,9 @@ function chatRow(session) {
   const sub = el('div', 'chat-sub', elsewhere ? `${projectName(session.projectId)} · ${state_}` : state_);
   main.append(top, sub);
 
+  const searchMatch = state.chatQuery && state.searchResults?.find(r => r.id === session.id)?.match;
+  if (searchMatch) { row.classList.add('search-result'); sub.textContent = redactCredentials(searchMatch.snippet); sub.title = sub.textContent; }
+
   const menuBtn = el('button', 'icon-btn chat-menu-btn');
   menuBtn.type = 'button';
   menuBtn.title = 'Chat actions';
@@ -3840,9 +3862,10 @@ function chatRow(session) {
   // turns out to name a chat that will not open. A chat in this project gets
   // the same treatment rather than a row that fails silently on every click.
   row.onclick = async () => {
-    if (elsewhere) return openElsewhere(session);
+    if (elsewhere) { await openElsewhere(session); jumpToSearchMatch(session.id); return; }
     try {
       await openSession(session.id);
+      jumpToSearchMatch(session.id);
     } catch (err) {
       addMessage('error', err.message);
       refreshLists().catch(() => {});
@@ -4314,6 +4337,7 @@ async function openSession(id) {
   if (id !== state.sessionId) stashDraft();
   const switched = id !== state.sessionId;
   state.sessionId = id;
+  state.workflow = null;
   if (switched) restoreDraft(id);
   followChatChoice(session);
   state.undo = session.undo || [];
@@ -4351,8 +4375,11 @@ async function openSession(id) {
   // Tool results arrive as their own messages, but belong to the call that
   // produced them -- fold them back into that card.
   const cards = new Map();
-  for (const m of session.messages) {
+  for (const [messageIndex, m] of session.messages.entries()) {
     if (m.role === 'system') continue;
+    const anchor = el('span', 'message-anchor');
+    anchor.dataset.messageIndex = String(messageIndex);
+    $('messages').append(anchor);
 
     if (m.role === 'tool') {
       const card = cards.get(m.tool_call_id);
@@ -4386,6 +4413,7 @@ async function openSession(id) {
   replayLive(id);
   syncBusy();
   renderOutcomeBar();
+  refreshWorkflow(id).catch(() => {});
   scrollDown(true);
   // The rail is a nicety here; the transcript is already on screen, and a
   // failed refresh must not read as a failure to open the chat.
@@ -4879,7 +4907,7 @@ function connect() {
     setRunning(d.sessionId, true);
     if (isPendingView(d.sessionId)) {
       const phase = ({ locate: 'Locating', diagnose: 'Diagnosing', implement: 'Building', verify: 'Verifying', complete: 'Finishing' })[d.phase] || 'Working';
-      const count = d.maxRounds > 0 ? `round ${d.round} of ${d.maxRounds}` : `round ${d.round}`;
+      const count = d.maxRounds > 0 ? `step ${d.round} of ${d.maxRounds}` : `step ${d.round}`;
       const label = `${phase} · ${count}`;
       $('roundInfo').textContent = label;
       setActivity(`Working… ${label}`);
@@ -5093,10 +5121,13 @@ function connect() {
     const { task } = JSON.parse(e.data);
     refreshTasks();
     toast(`Background task finished (exit ${task.exitCode ?? '?'}): ${task.command.slice(0, 90)}`);
-    // The completion note landed in the session transcript; pull it into view
-    // when it belongs to the open session and no turn is running over it.
-    if (task.sessionId && task.sessionId === state.sessionId && !isBusy()) {
-      openSession(state.sessionId).catch(() => {});
+    // The server immediately resumes the owning chat. Its normal turn events
+    // update the transcript; no fake user message needs to be pulled in here.
+  });
+  es.addEventListener('task_resume_failed', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.sessionId === state.sessionId) {
+      toast(`Background task finished, but Skadi could not resume automatically: ${data.error || 'model unavailable'}`);
     }
   });
 
@@ -5236,6 +5267,8 @@ $('settingsVeil').addEventListener('mousedown', (e) => {
 function wireChatPanel() {
   $('chatSearch').addEventListener('input', (e) => {
     state.chatQuery = e.target.value || '';
+    state.searchResults = null;
+    queueConversationSearch();
     renderChatList();
   });
   for (const btn of $('chatFilter').querySelectorAll('button')) {
@@ -8516,7 +8549,192 @@ async function boot() {
   }
 }
 
+// Workflow tools share the existing workspace and native keyboard focus model.
+let conversationSearchTimer;
+let conversationSearchVersion = 0;
+function queueConversationSearch() {
+  clearTimeout(conversationSearchTimer);
+  const version = ++conversationSearchVersion;
+  const query = state.chatQuery.trim();
+  if (!query) return;
+  conversationSearchTimer = setTimeout(async () => {
+    try {
+      const rows = await api(`sessions/search?q=${encodeURIComponent(query)}`);
+      if (version !== conversationSearchVersion) return;
+      state.searchResults = rows;
+      renderChatList();
+    } catch { if (version === conversationSearchVersion) toast('Transcript search unavailable; showing title matches.'); }
+  }, 250);
+}
+function jumpToSearchMatch(id) {
+  const match = state.searchResults?.find(s => s.id === id)?.match;
+  if (match?.index == null || state.sessionId !== id) return;
+  const anchor = document.querySelector(`[data-message-index="${match.index}"]`);
+  anchor?.scrollIntoView({ block: 'center' });
+  const target = anchor?.nextElementSibling;
+  if (target) { target.classList.add('search-highlight'); setTimeout(() => target.classList.remove('search-highlight'), 2200); }
+}
+async function refreshWorkflow(id = state.sessionId) {
+  if (!id) return;
+  const data = await api(`session/workflow?id=${encodeURIComponent(id)}`);
+  if (id !== state.sessionId || !Array.isArray(data.turns)) return;
+  state.workflow = data;
+  renderWorkflowOutcome();
+  renderTurnReview();
+}
+function commandSummary(turn) {
+  const commands = turn.commands || [];
+  const passed = commands.filter(c => c.status === 'passed').length;
+  const failed = commands.filter(c => c.status === 'failed').length;
+  const unknown = commands.length - passed - failed;
+  return `${passed} commands passed · ${failed} failed${unknown ? ` · ${unknown} unverified` : ''}`;
+}
+function renderWorkflowOutcome() {
+  const turn = state.workflow?.turns?.at(-1);
+  if (!turn || isBusy() || !state.sessionId) return;
+  const tasks = (state.tasks || []).filter(t => t.sessionId === state.sessionId);
+  const pending = tasks.filter(t => t.status === 'running').length;
+  const recovery = tasks.filter(t => t.status === 'interrupted').length;
+  const failed = (turn.commands || []).some(c => c.status === 'failed') || tasks.some(t => t.startedAt >= turn.startedAt && t.exitCode != null && t.exitCode !== 0);
+  const incomplete = turn.status !== 'finished';
+  $('outcomeTitle').textContent = recovery ? 'Recovery needed' : pending ? 'Background work running' : incomplete ? 'Task incomplete' : failed ? 'Commands need attention' : 'Ready for review';
+  $('outcomeHint').textContent = `${turn.files.length} files changed · ${commandSummary(turn)}${pending ? ` · ${pending} running` : ''} · Verify the result`;
+  $('outcomeBar').classList.toggle('incomplete', incomplete || failed || recovery > 0);
+}
+function renderTurnReview() {
+  const list = $('turnReviewList');
+  list.replaceChildren();
+  const turns = state.workflow?.turns || [];
+  if (!turns.length) { list.append(el('p', 'hint', 'Turn checkpoints are recorded for new requests. Earlier edits remain in the chat history.')); return; }
+  for (const turn of [...turns].reverse()) {
+    const section = el('details', 'turn-checkpoint');
+    section.append(el('summary', null, `${turn.name} · ${turn.status}`));
+    section.append(el('p', 'hint', `${turn.files.length} files · ${commandSummary(turn)}`));
+    const rename = el('button', 'btn tiny', 'Name checkpoint');
+    rename.onclick = () => askName('Name checkpoint', 'Name', turn.name, guard(async name => {
+      await api('session/checkpoint', { id: state.sessionId, turnId: turn.id, name });
+      await refreshWorkflow();
+    }));
+    section.append(rename);
+    if (turn.edits.length && !turn.edits.some(e => e.truncated)) {
+      const direction = turn.edits.every(e => e.undone) ? 'redo' : 'undo';
+      const restore = el('button', 'btn tiny', direction === 'undo' ? 'Revert turn' : 'Reapply turn');
+      restore.disabled = isBusy();
+      restore.onclick = guard(async () => {
+        const id = state.sessionId;
+        if (!await askConfirm(`${direction === 'undo' ? 'Revert' : 'Reapply'} ${turn.files.length} files in “${turn.name}”? Files changed since this checkpoint will be protected.`, { title: 'Restore checkpoint', ok: direction === 'undo' ? 'Revert turn' : 'Reapply turn', danger: direction === 'undo' })) return;
+        await api('session/checkpoint/restore', { id, turnId: turn.id, direction, confirm: 'RESTORE CHECKPOINT' });
+        if (state.sessionId === id) await openSession(id);
+      });
+      section.append(restore);
+    }
+    for (const command of turn.commands || []) section.append(el('p', 'checkpoint-command', `${command.status}${command.exitCode != null ? ` (${command.exitCode})` : ''} — ${command.command}`));
+    for (const task of turn.background || []) section.append(el('p', 'checkpoint-command', `Background: ${task.status} — ${task.command}`));
+    for (const edit of turn.edits) {
+      const file = el('details', 'checkpoint-file');
+      file.append(el('summary', null, `${edit.path}${edit.undone ? ' · reverted' : ''}`));
+      if (edit.truncated) file.append(el('p', 'hint', 'This edit exceeded the snapshot limit.'));
+      else { const diff = el('div', 'checkpoint-diff'); renderDiffLines(diff, edit.diff || 'No text differences'); file.append(diff); }
+      const open = el('button', 'btn tiny', 'Open file');
+      open.onclick = guard(() => openFileViewer(edit.path));
+      file.append(open);
+      section.append(file);
+    }
+    list.append(section);
+  }
+}
+let contextSessionId = null;
+async function openContextInspector() {
+  if (!state.sessionId) { toast('Open a chat to inspect its context.'); return; }
+  const id = state.sessionId;
+  await refreshWorkflow(id);
+  if (state.sessionId !== id || !state.workflow) return;
+  contextSessionId = id;
+  const context = state.workflow.context;
+  $('contextBuckets').replaceChildren(...Object.entries(context.buckets).map(([name, value]) => {
+    const row = el('div', 'context-bucket');
+    row.append(el('span', null, name), el('strong', null, `${num(value)} tokens`));
+    return row;
+  }));
+  $('pinnedRequirements').value = context.requirements;
+  $('contextSummary').textContent = redactCredentials(context.summary || 'No compaction summary yet.');
+  $('requirementsStatus').textContent = '';
+  $('contextDialog').showModal();
+}
+$('ctxInfo').onclick = guard(openContextInspector);
+$('saveRequirements').onclick = guard(async () => {
+  await api('session/requirements', { id: contextSessionId, requirements: $('pinnedRequirements').value });
+  $('requirementsStatus').textContent = 'Saved. These requirements are included at the next model request and survive compaction.';
+});
+for (const button of document.querySelectorAll('[data-close-dialog]')) button.onclick = () => button.closest('dialog').close();
+
+function paletteActions() {
+  return [
+    { label: 'New chat', run: () => $('btnNewSession').click() },
+    { label: 'Review changes', run: () => openChanges() },
+    { label: 'Changes by turn', run: async () => { selectWorkspaceTool('review'); $('turnReview').open = true; await refreshWorkflow(); } },
+    { label: 'Running tasks and recovery', run: () => selectWorkspaceTool('tasks') },
+    { label: 'Open files', run: () => selectWorkspaceTool('files') },
+    { label: 'Toggle browser', run: () => $('btnBrowser').click() },
+    { label: 'Change model', run: () => $('modelChip').click() },
+    { label: 'Settings', run: () => openSettings('model') },
+    { label: 'Context and pinned requirements', run: openContextInspector },
+    ...state.sessions.map(s => ({ label: `Chat: ${s.title}`, run: () => openElsewhere(s) })),
+    ...state.projects.map(p => ({ label: `Project: ${p.name}`, run: () => { $('projectSelect').value = p.id; $('projectSelect').dispatchEvent(new Event('change')); } })),
+  ];
+}
+let paletteVersion = 0;
+let paletteTimer;
+function drawPalette() {
+  const version = ++paletteVersion;
+  clearTimeout(paletteTimer);
+  const query = $('commandQuery').value.toLowerCase().trim();
+  const rows = paletteActions().filter(a => a.label.toLowerCase().includes(query)).slice(0, 40);
+  const list = $('commandResults'); list.replaceChildren();
+  for (const action of rows) {
+    const button = el('button', 'command-option', action.label);
+    button.type = 'button';
+    button.onclick = guard(async () => { $('commandDialog').close(); await action.run(); });
+    list.append(button);
+  }
+  if (!rows.length) list.append(el('p', 'hint', 'No matching commands or chats.'));
+  if (query.length >= 2 && state.activeProject) paletteTimer = setTimeout(async () => {
+    try {
+      const result = await api(`fs/find?q=${encodeURIComponent(query)}`);
+      if (version !== paletteVersion || !$('commandDialog').open) return;
+      if (result.results?.length) list.querySelector('p')?.remove();
+      for (const file of (result.results || []).slice(0, 12)) {
+        const button = el('button', 'command-option', `File: ${file.path}`);
+        button.type = 'button';
+        button.onclick = guard(async () => { $('commandDialog').close(); await openFileViewer(file.path); });
+        list.append(button);
+      }
+    } catch { /* Actions and chats remain available if file search is unavailable. */ }
+  }, 200);
+}
+function openPalette() { drawPalette(); $('commandDialog').showModal(); $('commandQuery').focus(); $('commandQuery').select(); }
+$('btnPalette').onclick = openPalette;
+$('commandQuery').oninput = drawPalette;
+$('commandDialog').addEventListener('keydown', event => {
+  if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
+  const buttons = [...$('commandResults').querySelectorAll('button')];
+  if (!buttons.length) return;
+  const index = buttons.indexOf(document.activeElement);
+  if (event.key === 'Enter' && index >= 0) return;
+  event.preventDefault();
+  if (event.key === 'Enter') buttons[0].click();
+  else buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length].focus();
+});
+document.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && !event.altKey) {
+    if (document.querySelector('dialog[open]') && !$('commandDialog').open) return;
+    event.preventDefault();
+    if ($('commandDialog').open) $('commandDialog').close(); else openPalette();
+  }
+});
+
 boot().catch((err) => {
+  console.error('Skadi startup failed', err);
   document.body.insertAdjacentHTML(
     'afterbegin',
     `<pre style="color:#ff6f7d;padding:18px;font:13px ui-monospace,monospace">Skadi failed to start: ${escapeHtml(err.message)}</pre>`,

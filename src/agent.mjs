@@ -122,8 +122,10 @@ export class Agent extends EventEmitter {
     // Images produced by tools mid-turn (screenshots), handed to the model on
     // the next round when it can actually see them.
     this.pendingImages = [];
-    // Messages the user typed while this turn was running, waiting for a
-    // boundary where a user message is legal. See steer().
+    // Messages queued while this turn was running, waiting for a boundary
+    // where their role is legal. Most are user steers; harness events such as
+    // background-task completion use system so they never impersonate user
+    // input. See steer().
     this.pendingSteers = [];
     // What the current round has streamed so far. Kept so a turn that dies
     // mid-stream (abort, provider error, the app being closed) can still put
@@ -177,9 +179,9 @@ export class Agent extends EventEmitter {
    * normally instead -- the turn may have ended while the message was in
    * flight.
    */
-  steer(content) {
+  steer(content, { role = 'user' } = {}) {
     if (!this.running) return false;
-    this.pendingSteers.push(content);
+    this.pendingSteers.push({ role: role === 'system' ? 'system' : 'user', content });
     this.emit('steer', { queued: this.pendingSteers.length });
     return true;
   }
@@ -189,7 +191,13 @@ export class Agent extends EventEmitter {
     if (!this.pendingSteers.length) return 0;
     const queued = this.pendingSteers;
     this.pendingSteers = [];
-    for (const content of queued) await this._append(messages, { role: 'user', content });
+    for (const item of queued) {
+      // A bare value was the pre-role API and remains a user steer.
+      const message = item && typeof item === 'object' && 'content' in item
+        ? item
+        : { role: 'user', content: item };
+      await this._append(messages, message);
+    }
     return queued.length;
   }
 
@@ -221,7 +229,12 @@ export class Agent extends EventEmitter {
     const maxRounds = budgets.maxRounds;
     const bounded = maxRounds > 0;
     const verificationReserve = ledger.complexity === 'hard' ? 4 : ledger.complexity === 'medium' ? 3 : 2;
-    const activeRoundLimit = () => Math.max(maxRounds, ledger.firstMaterialMutationRound ? ledger.firstMaterialMutationRound + verificationReserve : 0);
+    // Zero means genuinely unlimited. A post-edit verification reserve may
+    // extend a real ceiling, but must not invent a cosmetic denominator that
+    // the loop does not enforce (for example "round 50 of 9").
+    const activeRoundLimit = () => bounded
+      ? Math.max(maxRounds, ledger.firstMaterialMutationRound ? ledger.firstMaterialMutationRound + verificationReserve : 0)
+      : 0;
     const maxTurnMinutes = Math.max(0, Number(this.settings.maxTurnMinutes) || 0);
     const turnDeadline = maxTurnMinutes ? turnStarted + maxTurnMinutes * 60_000 : 0;
     const reviewEvery = Math.max(1, Number(this.settings.loopReviewEvery) || 3);
