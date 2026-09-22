@@ -16,6 +16,10 @@ import { ROOT } from './config.mjs';
 const MAX_READ_BYTES = 256 * 1024;
 const MAX_OUTPUT_CHARS = 30000;
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.venv', '__pycache__', '.next']);
+// Same image cap as the edit history (edits.mjs keeps its own copy -- no
+// import cycle) and a total budget so a snapshot never holds unbounded text.
+const MAX_SNAPSHOT_IMAGE = 1024 * 1024;
+const MAX_SNAPSHOT_TOTAL = 32 * 1024 * 1024;
 
 export class ToolError extends Error {}
 
@@ -231,6 +235,81 @@ async function* walk(dir, root, depth = 0) {
   }
 }
 
+// A shell is not a sandbox: a command can write anything the workspace owns,
+// so run_command catches its changes the way the file tools do -- snapshot
+// before, diff after, fold each changed file into the session's edit history.
+// Background tasks are excluded on purpose: they outlive the call, so their
+// writes would be attributed to whoever runs the next command.
+//
+// A file counts as changed when its mtime or size moves; a same-size rewrite
+// landing in the same millisecond is accepted as a miss rather than paying
+// for a full content compare.
+async function snapshotTree(root, { images = false } = {}) {
+  const files = new Map();
+  let held = 0;
+  for await (const rel of walk(root, root)) {
+    const info = await stat(join(root, rel)).catch(() => null);
+    if (!info || !info.isFile()) continue;
+    let content = null;
+    if (images && info.size <= MAX_SNAPSHOT_IMAGE && held + info.size <= MAX_SNAPSHOT_TOTAL) {
+      try {
+        content = await readFile(join(root, rel), 'utf8');
+      } catch {
+        content = null; // unreadable: still counted, just not diffable
+      }
+      if (content != null) held += info.size;
+    }
+    files.set(rel, { mtime: info.mtimeMs, size: info.size, content });
+  }
+  return files;
+}
+
+function changeEntry(verb, rel, existed, beforeContent, afterContent) {
+  // A NUL marks a binary file; a missing image means the file was too big to
+  // hold. Either way the change is counted in the bar but cannot be diffed
+  // or undone.
+  const text = (s) => s != null && !s.includes('\0');
+  if (!text(beforeContent) || !text(afterContent)) {
+    return { verb, rel, existed, before: null, after: null, added: null, removed: null };
+  }
+  const d = unifiedDiff(beforeContent, afterContent);
+  return { verb, rel, existed, before: beforeContent, after: afterContent, added: d.added, removed: d.removed };
+}
+
+async function diffSnapshots(root, before, after) {
+  const readAfter = async (rel, size) => {
+    if (size > MAX_SNAPSHOT_IMAGE) return null;
+    try {
+      return await readFile(join(root, rel), 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  const changes = [];
+  for (const [rel, b] of before) {
+    const a = after.get(rel);
+    if (!a) {
+      changes.push(changeEntry('Deleted', rel, true, b.content ?? '', ''));
+      continue;
+    }
+    if (a.mtime === b.mtime && a.size === b.size) continue;
+    changes.push(changeEntry('Changed', rel, true, b.content ?? '', await readAfter(rel, a.size)));
+  }
+  for (const [rel, a] of after) {
+    if (before.has(rel)) continue;
+    changes.push(changeEntry('Created', rel, false, '', await readAfter(rel, a.size)));
+  }
+  return changes;
+}
+
+/** One line for the tool result: the files a command changed, with stats. */
+function workspaceChangesLine(changes) {
+  const shown = changes.slice(0, 8).map((c) =>
+    c.added == null ? c.rel : statLine(c.verb, c.rel, c.added, c.removed),
+  );
+  return `[harness] workspace changes: ${shown.join(', ')}${changes.length > 8 ? ` (+${changes.length - 8} more)` : ''}`;
+}
+
 /**
  * ctx carries { workspace, settings, approve } where `approve` is an async
  * predicate the server wires to the UI's approval prompt.
@@ -436,7 +515,7 @@ export function buildTools(ctx) {
           required: ['command'],
         },
       },
-      async run({ command, shell, background }) {
+      async run({ command, shell, background }, meta) {
         const priv = privateCommandHit(command, ctx.workspace);
         if (priv) {
           const name = dirName(priv);
@@ -445,6 +524,9 @@ export function buildTools(ctx) {
               (name === 'sessions' ? '. Each chat is private -- you cannot read another session.' : '.'),
           );
         }
+        const root = resolve(ctx.workspace);
+        // Background tasks are not snapshot-diffed: the process outlives this
+        // call, so its writes would land in the next command's before/after.
         if (background && ctx.startBackground) {
           const task = ctx.startBackground({ command, shell });
           return (
@@ -460,9 +542,19 @@ export function buildTools(ctx) {
           ? ['/c', command]
           : ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command];
 
+        // Snapshot before the command so its writes can be folded into the
+        // session's edit history the way write_file/edit_file do. Best effort:
+        // a failed snapshot only means this command's changes go uncounted.
+        let before;
+        try {
+          before = await snapshotTree(root, { images: true });
+        } catch {
+          before = null;
+        }
+
         return new Promise((resolvePromise) => {
           const child = spawn(exe, args, {
-            cwd: resolve(ctx.workspace),
+            cwd: root,
             windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe'],
           });
@@ -485,9 +577,30 @@ export function buildTools(ctx) {
             clearTimeout(timer);
             resolvePromise(`[harness] failed to start: ${err.message}`);
           });
-          child.on('close', (code) => {
+          child.on('close', async (code) => {
             clearTimeout(timer);
-            resolvePromise(clip(`exit code ${code}\n${out.trim() || '(no output)'}`));
+            const base = `exit code ${code}\n${out.trim() || '(no output)'}`;
+            let changes = [];
+            if (before) {
+              try {
+                const after = await snapshotTree(root, { images: false });
+                changes = await diffSnapshots(root, before, after);
+                for (const c of changes) {
+                  ctx.recordEdit?.({
+                    callId: meta?.callId ?? null,
+                    path: c.rel,
+                    before: c.before,
+                    after: c.after,
+                    added: c.added,
+                    removed: c.removed,
+                    existed: c.existed,
+                  });
+                }
+              } catch {
+                changes = []; // output is the contract; change tracking is best effort
+              }
+            }
+            resolvePromise(clip(changes.length ? `${base}\n${workspaceChangesLine(changes)}` : base));
           });
         });
       },

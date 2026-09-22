@@ -509,14 +509,6 @@ body.resizing-split-v * { user-select: none !important; }
   border-radius: var(--radius) var(--radius) 2px var(--radius);
   padding: 9px 13px;
 }
-/* The compaction summary, streaming in above the prompt that triggered it.
-   Set apart from a normal answer so it reads as a marker in the transcript. */
-.msg.compaction .role { color: var(--text-dim); }
-.msg.compaction .body {
-  border-left: 2px solid var(--line);
-  padding-left: 11px;
-  color: var(--text-dim);
-}
 
 .msg.error .role { color: var(--bad); }
 .msg.error .body {
@@ -3994,7 +3986,7 @@ label .help:hover { color: var(--text); border-color: var(--text-faint); }
 .tree-note { margin: 8px 6px 0; }
 
 /* A round that only made calls leaves an empty bubble behind; it has nothing to show. */
-.msg.assistant:not(.compaction):has(> .body:empty):has(> .think[hidden]) { display: none; }
+.msg.assistant:has(> .body:empty):has(> .think[hidden]) { display: none; }
 
 
 /* ---------------------------------------------------------- image lightbox */

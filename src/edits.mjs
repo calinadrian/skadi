@@ -25,8 +25,11 @@ export function recordEdit(session, entry) {
   const before = String(entry.before ?? '');
   const after = String(entry.after ?? '');
   // Either image alone being oversized makes the pair unusable, so neither is
-  // stored: a clipped image is worse than no history at all.
-  const truncated = size(before) > MAX_IMAGE_BYTES || size(after) > MAX_IMAGE_BYTES;
+  // stored: a clipped image is worse than no history at all. An entry with no
+  // image at all (a shell change to a file too big to hold) is likewise
+  // irreversible.
+  const noImage = entry.before == null && entry.after == null;
+  const truncated = noImage || size(before) > MAX_IMAGE_BYTES || size(after) > MAX_IMAGE_BYTES;
   session.undo ??= [];
   session.undo.push({
     callId: entry.callId ?? null,

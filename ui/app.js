@@ -79,11 +79,6 @@ const state = {
   chatQuery: '',
   editing: null,   // profile id shown in the settings panel
   streaming: null, // { raw, bodyEl, thinkEl, thinkBody, metaEl }
-  // The compaction summary's own bubble. Kept apart from `streaming` because
-  // the summary belongs *above* the prompt whose turn triggered it, not at the
-  // end of that turn -- and because the round's real answer still needs its
-  // own bubble once compaction is done.
-  compacting: null, // { raw, bodyEl, thinkEl, thinkBody, frame }
   lastAssistant: null,
   // Session ids with a turn running right now, as last reported by the
   // server's `turns` event. Several chats can be mid-turn at once, so "busy"
@@ -613,57 +608,6 @@ function scheduleRender() {
   });
 }
 
-/**
- * Bubble for the compaction summary as it streams.
- *
- * The summary condenses everything that came *before* the current prompt, and
- * that is where the saved transcript puts it: compaction replaces the head and
- * the tail it keeps always ends with the prompt that started the turn. Letting
- * it stream into the round's own bubble showed it underneath that prompt --
- * the opposite order -- until `agent_done` reopened the chat and silently
- * moved it. So it gets its own bubble, inserted ahead of the last user
- * message, and the round's answer keeps the one the `round` event made.
- */
-function beginCompaction() {
-  $('emptyState')?.remove();
-  const wrap = el('div', 'msg assistant compaction');
-  wrap.append(el('div', 'role', 'compacted context'));
-
-  const think = el('details', 'think');
-  think.hidden = true;
-  think.append(el('summary', null, 'reasoning'), el('div', 'think-body'));
-
-  const body = el('div', 'body');
-  wrap.append(think, body);
-
-  // Ahead of the prompt this turn is answering. No user message on screen
-  // (a replay that has not reached it yet) means the end is the right place.
-  const users = $('messages').querySelectorAll('.msg.user');
-  const anchor = users[users.length - 1];
-  if (anchor) $('messages').insertBefore(wrap, anchor);
-  else $('messages').append(wrap);
-
-  state.compacting = {
-    raw: '',
-    bodyEl: body,
-    thinkEl: think,
-    thinkBody: think.querySelector('.think-body'),
-    frame: 0,
-  };
-  scrollDown();
-}
-
-/** Same per-frame coalescing as scheduleRender, for the compaction bubble. */
-function scheduleCompactRender() {
-  const c = state.compacting;
-  if (!c || c.frame) return;
-  c.frame = requestAnimationFrame(() => {
-    c.frame = 0;
-    c.bodyEl.replaceChildren(renderMarkdown(c.raw));
-    scrollDown();
-  });
-}
-
 /** Rough live rate while tokens arrive; replaced by the exact figure on stats. */
 function liveRate(s) {
   if (!s?.startedAt || !s.chars) return null;
@@ -830,7 +774,6 @@ function addTool(name, args, result) {
 /** An assistant bubble with nothing in it yet: it does not separate two runs of calls. */
 function isEmptyBubble(node) {
   if (!node.classList?.contains('msg') || !node.classList.contains('assistant')) return false;
-  if (node.classList.contains('compaction')) return false;
   const think = node.querySelector('.think');
   return !node.querySelector('.body')?.textContent.trim() && (!think || think.hidden);
 }
@@ -890,7 +833,6 @@ function foldThoughts(group) {
 /** An assistant bubble holding nothing but reasoning (and its speed line). */
 function isThoughtBubble(node) {
   if (!node.classList?.contains('msg') || !node.classList.contains('assistant')) return false;
-  if (node.classList.contains('compaction')) return false;
   const think = node.querySelector('.think');
   return Boolean(think) && !think.hidden && !node.querySelector('.body')?.textContent.trim();
 }
@@ -4473,7 +4415,6 @@ async function openSession(id) {
   // the live renderer write into. Left set, they would keep writing into a
   // node that is no longer in the document.
   state.streaming = null;
-  state.compacting = null;
   state.lastAssistant = null;
   // Meter from the stored transcript until the next turn reports real usage.
   // The server's figure counts the live transcript -- what the model actually
@@ -4847,25 +4788,6 @@ function applyAgentEvent(type, d, startedAt = null) {
     scrollDown();
     return;
   }
-  if (type === 'compact_progress') {
-    // The summary is a real assistant message that will persist: stream it
-    // into a bubble of its own, reasoning into the think pane. agent_done
-    // re-opens the session afterwards, so this preview is replaced by the
-    // canonical render — never duplicated. It goes above the prompt that
-    // triggered the turn, matching where the saved transcript keeps it.
-    if (!state.compacting) beginCompaction();
-    const c = state.compacting;
-    if (d.reasoning) {
-      c.thinkEl.hidden = false;
-      c.thinkBody.textContent += d.reasoning;
-      c.thinkBody.scrollTop = c.thinkBody.scrollHeight;
-    }
-    if (d.text) {
-      c.raw += d.text;
-      scheduleCompactRender();
-    }
-    scrollDown();
-  }
 }
 
 // Events that arrive only after the server has written the transcript, so
@@ -4888,7 +4810,6 @@ function replayLive(sessionId) {
   const live = buffers.get(sessionId);
   if (!live) return;
   state.streaming = null;
-  state.compacting = null;
   for (const ev of live.events) applyAgentEvent(ev.type, ev.data, live.startedAt);
 }
 
@@ -5132,7 +5053,6 @@ function connect() {
     // looking elsewhere while it ran).
     if (finishedSessionId && state.sessionId === finishedSessionId) {
       state.streaming = null;
-      state.compacting = null;
       await openSession(state.sessionId);
       renderOutcomeBar();
       return;
@@ -5262,7 +5182,6 @@ function connect() {
     if (draft ? state.sessionId == null : isPendingView(sessionId)) {
       addMessage('error', error);
       state.streaming = null;
-      state.compacting = null;
     } else {
       toast(`Chat error: ${error}`);
     }
@@ -5285,18 +5204,16 @@ function connect() {
     if (isPendingView(d.sessionId)) {
       $('roundInfo').textContent = `compacting context… ${(d.chars / 1000).toFixed(1)}k chars summarised`;
     }
-    liveEvent('compact_progress', d);
+    // Compaction is transient: the status line carries it while it runs, and the
+    // summary lands in its canonical position when agent_done re-renders the saved
+    // transcript.
   });
 
   es.addEventListener('agent_compact_end', (e) => {
     const d = JSON.parse(e.data);
-    // The rewritten transcript is on disk; the streamed summary preview in
-    // the buffer is now part of the saved file.
+    // The rewritten transcript is on disk; the pre-compaction events still
+    // buffered are now redundant with it.
     if (d.compacted) resetLive(d.sessionId);
-    // This summary is finished. Releasing the bubble means a second
-    // compaction later in the session writes its own instead of appending to
-    // the first one'''s text.
-    state.compacting = null;
     if (!isPendingView(d.sessionId)) return;
     if (d.compacted) {
       compactedThisTurn = true;
