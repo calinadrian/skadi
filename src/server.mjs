@@ -2675,6 +2675,41 @@ export class Skadi {
           const server = await this.startServer(profileId);
           return json(200, { profileId, config: this.config, server });
         }
+        case 'POST model/delete': {
+          // Remove a model file from the computer, together with the
+          // profiles built for it. A loaded model must be ejected first.
+          const { name } = await readBody();
+          const file = basename(String(name || ''));
+          if (!file) return json(400, { error: 'no model name' });
+          const dir = this.config.modelsDir;
+          const path = join(dir, file).replace(/\\/g, '/');
+          if (!existsSync(path)) return json(404, { error: `${file} is not in ${dir}.` });
+          const base = (s) => String(s || '').replace(/\\/g, '/').split('/').pop().toLowerCase();
+          const profileIds = Object.keys(this.config.profiles)
+            .filter((id) => base(this.config.profiles[id].model) === file.toLowerCase());
+          if (this.liveInstances().some((i) => profileIds.includes(i.id))) {
+            return json(409, { error: 'That model is loaded. Eject it first, then delete it.' });
+          }
+          if (Object.keys(this.config.profiles).length - profileIds.length < 1) {
+            return json(400, { error: 'That model owns the only profile left.' });
+          }
+          const { unlink } = await import('node:fs/promises');
+          for (const id of profileIds) {
+            delete this.config.profiles[id];
+            this.shapeCache.delete(id);
+          }
+          if (this.config.activeProfile && profileIds.includes(this.config.activeProfile)) {
+            this.config.activeProfile = Object.keys(this.config.profiles)[0];
+          }
+          await unlink(path);
+          const meta = loadModelMeta()[file];
+          if (meta?.mmproj) {
+            const side = join(dir, meta.mmproj);
+            if (existsSync(side)) await unlink(side);
+          }
+          saveConfig(this.config);
+          return json(200, { config: this.config, activeProfile: this.config.activeProfile });
+        }
 
         // ---- Hugging Face ------------------------------------------------
         case 'GET hf/search':

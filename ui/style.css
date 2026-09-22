@@ -3384,6 +3384,31 @@ a.mm-link { width: fit-content; }
 .mm-row-foot { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 
 /* Installed */
+.mm-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mm-delete {
+  font: inherit;
+  color: #f87171;
+  background: transparent;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  border-radius: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.mm-delete:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.12);
+}
+.mm-delete:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.mm-delete:focus-visible {
+  outline: 2px solid rgba(248, 113, 113, 0.7);
+  outline-offset: 2px;
+}
 .mm-bar { display: flex; align-items: center; gap: 12px; padding: 12px var(--mm-pad); border-bottom: 1px solid var(--line-soft); }
 .mm-path { flex: 1; min-width: 0; color: var(--text-faint); font: 400 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mm-list { flex: 1; overflow-y: auto; }

@@ -6332,7 +6332,30 @@ function renderInstalled() {
         await refreshModels();
       }
     });
-    row.append(main, action);
+    const del = el('button', 'mm-delete', 'Delete');
+    del.type = 'button';
+    del.disabled = m.loaded;
+    del.title = m.loaded
+      ? 'Eject the model before you can delete it'
+      : `Delete ${m.name} from the computer`;
+    del.onclick = guard(async () => {
+      const label = m.name.replace(/\.gguf$/i, '');
+      if (!window.confirm(
+        `Delete ${label} from this computer?\n\nThis removes the file${m.mmproj ? ' and its vision file' : ''} from ${data.dir}, along with the profiles built for it. You can download it again later.`,
+      )) return;
+      del.disabled = true;
+      try {
+        const res = await api('model/delete', { name: m.name });
+        state.config = res.config;
+      } finally {
+        await refreshModels();
+        await refreshQuickModels();
+      }
+    });
+
+    const actions = el('div', 'mm-row-actions');
+    actions.append(action, del);
+    row.append(main, actions);
     list.append(row);
   }
   pane.append(list);
