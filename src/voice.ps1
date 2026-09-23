@@ -5,11 +5,17 @@
 #   {"type":"partial","text":"..."}
 #   {"type":"heard","text":"...","confidence":0.83}
 #   {"type":"error","message":"..."}
-# It runs until stdin closes.
-param([string]$Culture = '', [string]$Wake = '')
+# It runs until the Skadi process that started it (-ParentPid) exits or kills it.
+param([string]$Culture = '', [string]$Wake = '', [int]$ParentPid = 0, [string]$Wav = '')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 function Say($obj) { [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
+
+# How to say wake words dictation cannot spell, in the SAPI phone set. Without
+# this, Windows hears "Skadi" as "study", "scud" or "the deal".
+$Pronounce = @{
+  skadi = @('s k aa d iy', 's k ae d iy', 's k aa t iy')
+}
 
 try {
   Add-Type -AssemblyName System.Speech
@@ -24,43 +30,74 @@ try {
   if (-not $info) { $info = $installed[0] }
 
   $engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine $info
-  $engine.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))
-  # Free dictation seldom spells an unusual name like "Skadi" right. A grammar
-  # of "wake word, then anything" lets the engine hear it as a word.
+  # Free dictation only without a wake word: beside the wake grammar it wins
+  # the vote and turns "Skadi, open notepad" into "To daddy open notepad".
+  # (A bare "Skadi" cannot arm the next sentence either: one word alone is
+  # scored near zero and rejected, so the command comes in the same breath.)
+  if (-not $Wake) { $engine.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar)) }
+  # "Wake word, then optionally anything": a grammar of its own, with the
+  # word's pronunciation spelled out, so the engine listens for that sound.
   if ($Wake) {
-    foreach ($tail in @($true, $false)) {
-      $gb = New-Object System.Speech.Recognition.GrammarBuilder
-      $gb.Culture = $info.Culture
-      $gb.Append($Wake)
-      if ($tail) { $gb.AppendDictation() }
-      $engine.LoadGrammar((New-Object System.Speech.Recognition.Grammar $gb))
+    $S = 'System.Speech.Recognition.SrgsGrammar'
+    $doc = New-Object "$S.SrgsDocument"
+    $doc.Culture = $info.Culture
+    $doc.PhoneticAlphabet = [System.Speech.Recognition.SrgsGrammar.SrgsPhoneticAlphabet]::Sapi
+    $rule = New-Object "$S.SrgsRule" 'wake'
+    # The wake word in each of its pronunciations.
+    function New-Spoken {
+      $spoken = New-Object "$S.SrgsOneOf"
+      $prons = $Pronounce[$Wake.ToLower()]
+      if ($prons) {
+        foreach ($p in $prons) {
+          $token = New-Object "$S.SrgsToken" $Wake
+          $token.Pronunciation = $p
+          $spoken.Add((New-Object "$S.SrgsItem" $token))
+        }
+      } else {
+        $spoken.Add((New-Object "$S.SrgsItem" $Wake))
+      }
+      return ,$spoken
     }
+    $rule.Add((New-Object "$S.SrgsItem" (New-Spoken)))
+    $tail = New-Object "$S.SrgsItem" 0, 1
+    $tail.Add([System.Speech.Recognition.SrgsGrammar.SrgsRuleRef]::Dictation)
+    $rule.Add($tail)
+    $doc.Rules.Add($rule)
+    $doc.Root = $rule
+    $grammar = New-Object System.Speech.Recognition.Grammar $doc
+    $grammar.Name = 'wake'
+    $engine.LoadGrammar($grammar)
+
   }
-  $engine.SetInputToDefaultAudioDevice()
+  if ($Wav) { $engine.SetInputToWaveFile($Wav) } else { $engine.SetInputToDefaultAudioDevice() }
   $engine.EndSilenceTimeout = [TimeSpan]::FromMilliseconds(700)
 
   Register-ObjectEvent -InputObject $engine -EventName SpeechRecognized -SourceIdentifier heard | Out-Null
   Register-ObjectEvent -InputObject $engine -EventName SpeechHypothesized -SourceIdentifier partial | Out-Null
+  Register-ObjectEvent -InputObject $engine -EventName RecognizeCompleted -SourceIdentifier finished | Out-Null
   $engine.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
   Say @{ type = 'ready'; culture = $info.Culture.Name }
 
-  # Poll stdin between events so a closed pipe ends the loop.
-  $stdin = [Console]::In
-  $readTask = $stdin.ReadLineAsync()
+  # Nothing here may block: a stdin read in Windows PowerShell 5.1 does, and
+  # stalled this loop after the first event. Watch the parent instead.
   while ($true) {
-    if ($readTask.IsCompleted) {
-      if ($null -eq $readTask.Result) { break }
-      $readTask = $stdin.ReadLineAsync()
-    }
     $evt = Wait-Event -Timeout 1
-    if (-not $evt) { continue }
+    if (-not $evt) {
+      if ($ParentPid -and -not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
+      continue
+    }
     $result = $evt.SourceEventArgs.Result
-    if ($evt.SourceIdentifier -eq 'heard' -and $result) {
-      Say @{ type = 'heard'; text = $result.Text; confidence = [Math]::Round($result.Confidence, 2) }
-    } elseif ($evt.SourceIdentifier -eq 'partial' -and $result) {
+    $id = $evt.SourceIdentifier
+    Remove-Event -EventIdentifier $evt.EventIdentifier
+    if ($id -eq 'finished') { break }
+    if ($id -eq 'heard' -and $result) {
+      $isWake = $result.Grammar.Name -eq 'wake'
+      # The wake grammar bends any speech toward "Skadi ..."; a weak match is noise.
+      if ($isWake -and $result.Confidence -lt 0.45) { continue }
+      Say @{ type = 'heard'; text = $result.Text; confidence = [Math]::Round($result.Confidence, 2); wake = $isWake }
+    } elseif ($id -eq 'partial' -and $result) {
       Say @{ type = 'partial'; text = $result.Text }
     }
-    Remove-Event -EventIdentifier $evt.EventIdentifier
   }
   $engine.RecognizeAsyncCancel()
   $engine.Dispose()

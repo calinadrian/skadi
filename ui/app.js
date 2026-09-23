@@ -9571,7 +9571,7 @@ function renderSettingsPane() {
     type: 'text',
     icon: 'bolt',
     label: 'Wake word',
-    desc: 'With the microphone on, only what you say after this word is sent: "Skadi, open Spotify". Say it alone and Skadi waits for your next sentence. Leave it empty to send everything you say. Turn the microphone off and on after changing it.',
+    desc: 'With the microphone on, only what you say after this word is sent: "Skadi, open Spotify". Say it and the request in one breath. Leave it empty to send everything you say. Turn the microphone off and on after changing it.',
   });
   addRow(voiceGroup, {
     key: 'voiceSpeak',

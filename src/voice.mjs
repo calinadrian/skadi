@@ -65,9 +65,9 @@ export class VoiceListener extends EventEmitter {
       this._set({ listening: false, error: 'Voice control needs Windows speech recognition.' });
       return this.state;
     }
-    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, '-Culture', culture, '-Wake', wake], {
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, '-Culture', culture, '-Wake', wake, '-ParentPid', String(process.pid)], {
       windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child = child;
     this._set({ listening: true, error: null });
@@ -91,10 +91,8 @@ export class VoiceListener extends EventEmitter {
   stop() {
     const child = this.child;
     this.child = null;
-    if (child) {
-      try { child.stdin.end(); } catch {}
-      setTimeout(() => { try { child.kill(); } catch {} }, 1500).unref();
-    }
+    // The script also exits by itself if Skadi goes away (-ParentPid).
+    if (child) try { child.kill(); } catch {}
     this._set({ listening: false });
     return this.state;
   }
