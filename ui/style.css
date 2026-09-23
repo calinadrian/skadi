@@ -3703,6 +3703,12 @@ a.mm-link { width: fit-content; }
   color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent-edge);
 }
+/* Voice: listening pulses; right after the wake word it glows solid. */
+.composer-bar .voice-toggle.active { animation: voice-pulse 1.8s ease-in-out infinite; }
+.composer-bar .voice-toggle.awake { background: var(--accent); color: var(--bg); animation: none; }
+.composer-bar .voice-toggle.error { color: var(--danger, #e5484d); }
+@keyframes voice-pulse { 50% { box-shadow: inset 0 0 0 1px var(--accent-edge), 0 0 0 4px var(--accent-row); } }
+@media (prefers-reduced-motion: reduce) { .composer-bar .voice-toggle.active { animation: none; } }
 .composer-bar .capability-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .composer-bar .capability-toggle:disabled { opacity: .45; cursor: not-allowed; }
 .composer-bar .send-btn { width: 34px; height: 34px; border-radius: 10px; margin-left: 4px; }
@@ -4877,6 +4883,10 @@ figure.pixel-shot figcaption { margin-top: 8px; color: var(--text-dim); font-siz
 .settings-group.collapsed .group-head { border-bottom: 0; }
 
 .settings-group > .settings-row { min-height: 0; padding: 16px 20px; align-items: center; }
+/* A wide control (a credential field, a row of buttons) wraps under its label
+   rather than squeezing the label into a one-word column. */
+.settings-group > .settings-row { flex-wrap: wrap; row-gap: 10px; }
+.settings-group > .settings-row > .settings-row-main { min-width: min(240px, 100%); }
 .settings-row-main { gap: 4px; }
 .settings-row-name { white-space: normal; }
 .settings-row-desc { max-width: 62ch; }

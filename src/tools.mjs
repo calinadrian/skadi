@@ -47,13 +47,14 @@ export class ToolError extends Error {}
 // session cannot read another's transcript, and nothing can read the stored
 // provider keys. Memory and skills are deliberately absent -- those are the
 // sanctioned way to carry something across sessions.
-export const PRIVATE_DIRS = ['sessions', 'config', 'logs', 'attachments'].map((d) => resolve(ROOT, d));
+export const PRIVATE_DIRS = ['sessions', 'config', 'logs', 'attachments', 'voices'].map((d) => resolve(ROOT, d));
 
 const PRIVATE_LABEL = {
   sessions: 'other chats are private; use memory to carry something across sessions',
   config: 'it holds provider credentials',
   logs: 'it holds raw prompt and server logs',
   attachments: 'it holds files from other chats',
+  voices: "it holds the user's voice recording",
 };
 
 /** The private directory `target` sits in, or null. Also matches the dir itself. */

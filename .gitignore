@@ -18,6 +18,8 @@
 # ...and inside those folders, only what a release contains.
 /src/*
 !/src/*.mjs
+!/src/*.ps1
+!/src/*.py
 /ui/*
 !/ui/*.js
 !/ui/*.css

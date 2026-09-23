@@ -59,6 +59,9 @@ import { MissionStore, ROOMS, roomBrief, roomToolsOff, parseTickets, normalizeTi
 import { loadProjects, activeProject, addProject, removeProject, selectProject, projectSummary, projectsWithStatus } from './projects.mjs';
 import { storeAttachment, attachmentsToBlocks, describeAttachments } from './attachments.mjs';
 import { AgentBrowser, browserTools, SHOTS_DIR, VIEWPORT, profileDirFor } from './browser.mjs';
+import { DesktopHelper, desktopTools } from './desktop.mjs';
+import { VoiceListener } from './voice.mjs';
+import { VoiceEngine, voiceFor, saveVoiceSample, clearVoiceSamples, BUILTIN_VOICES } from './tts.mjs';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -297,6 +300,19 @@ function repairSession(session) {
   return count;
 }
 
+/** Said to the agent alongside a spoken request. */
+export function voiceTurnNote(settings) {
+  return [
+    '[The user said this out loud through voice control; your reply is read aloud to them.]',
+    'Answer in one or two short spoken sentences: no markdown, lists, code or links unless they ask for them.',
+    settings.computerControl
+      ? 'Requests like "open Chrome", "play my playlist" or "turn it up" are about their own computer: do them with the desktop_* tools. ' +
+        'Chain the steps yourself (open the app or URL, read its controls with desktop_elements, click, type) and check the result before saying it is done. ' +
+        'Their browser is already signed in, so their playlists and accounts are there. If something is ambiguous, such as which playlist, ask one short question.'
+      : 'Controlling their computer is switched off (Settings, Voice & desktop), so if they ask you to operate an app, say so in one sentence.',
+  ].join(' ');
+}
+
 export class Skadi {
   constructor() {
     this.config = loadConfig();
@@ -322,6 +338,12 @@ export class Skadi {
       },
     });
     this.webSearchStatus = this.localSearxng.state;
+    // Voice control and desktop control. Neither starts a process until used.
+    this.desktop = new DesktopHelper();
+    this.voice = new VoiceListener();
+    this.voice.on('state', (state) => this.broadcast('voice_state', state));
+    this.voice.on('speech', (msg) => this.broadcast('voice_speech', msg));
+    this.voiceEngine = new VoiceEngine({ onStatus: (status) => this.broadcast('voice_engine', this.voiceEngineStatus(status)) });
     this.pendingApprovals = new Map();
     // Live turns, keyed by session id. One chat, one turn -- but several
     // chats can run at once, each with its own agent, transcript and tools.
@@ -1977,6 +1999,15 @@ export class Skadi {
           session: this.turns.get(ctx.sessionId)?.session ?? null,
         }),
       } } : {}),
+      // The user's real screen, mouse and keyboard -- only when they turned
+      // it on in Settings.
+      ...(this.settings.computerControl && !readOnly ? desktopTools(this.desktop, {
+        vision: () => provider.vision !== false,
+        onScreenshot: (shot) => {
+          this.broadcast('screenshot', { name: shot.name, bytes: shot.bytes, sessionId: ctx.sessionId ?? null });
+          self?.offerImage({ mediaType: shot.mediaType, data: shot.base64, label: "Screenshot of the user's desktop." });
+        },
+      }) : {}),
       ...browserTools(() => this.getBrowser(ctx.sessionId), {
         vision: () => provider.vision !== false,
         onScreenshot: (shot) => {
@@ -2500,6 +2531,7 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
       : opts.subagents !== false;
     if (systemMessage) session.messages.push({ role: 'system', content: systemMessage });
     else this.appendUserMessage(session, text, uploads, provider);
+    if (opts.voice && !systemMessage) session.messages.push({ role: 'system', content: voiceTurnNote(this.settings) });
     // Where this turn starts, for reading back what it said once it ends.
     const turnMark = session.messages.at(-1);
 
@@ -3891,7 +3923,7 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
         // ---- the turn ----------------------------------------------------
         case 'POST chat': {
           const {
-            sessionId, draftKey, message, attachments = [], effort = 'default', provider, model, webSearch = true, subagents = true,
+            sessionId, draftKey, message, attachments = [], effort = 'default', provider, model, webSearch = true, subagents = true, voice = false,
           } = await readBody();
           json(202, { accepted: true, attachments: describeAttachments(attachments) });
           // The chat a failure belongs to. For a brand-new chat that is not
@@ -3904,7 +3936,7 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
           // end left the rail pulsing “working…” over a chat that had
           // finished. The turn announces itself at the start, and the window
           // refreshes the row from `agent_done`.
-          this.chat(sessionId, message, attachments, { effort, onSession, draftKey, provider, model, webSearch, subagents }).catch((err) => {
+          this.chat(sessionId, message, attachments, { effort, onSession, draftKey, provider, model, webSearch, subagents, voice }).catch((err) => {
             // Also log it: a turn can fail with no browser attached, and a
             // silent failure is the hardest kind to debug.
             console.error('[agent]', err.message);
@@ -3935,6 +3967,8 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
         case 'POST settings':
           this.settings = saveSettings(await readBody());
           this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
+    this.voiceEngine.reconcile(this.settings);
+          this.voiceEngine.reconcile(this.settings);
           // The running agent holds the old object; hand it the new one so a
           // mid-session permission-mode switch (or any other tweak) applies to
           // the very next tool call instead of the next turn.
@@ -3952,6 +3986,51 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
           res.end(canvas.png(scale));
           return;
         }
+        case 'GET voice/status':
+          return json(200, this.voice.state);
+        case 'POST voice/start':
+          return json(200, this.voice.start({ culture: this.settings.voiceCulture || '', wake: this.settings.voiceWakeWord || '' }));
+        case 'GET voice/engine':
+          return json(200, this.voiceEngineStatus());
+        case 'POST voice/engine/restart':
+          this.voiceEngine.restart().catch(() => {});
+          return json(200, { ok: true });
+        case 'POST voice/token': {
+          // Stored for the engine, never echoed back.
+          const { token } = await readBody();
+          await this.voiceEngine.setToken(token);
+          return json(200, this.voiceEngineStatus());
+        }
+        case 'POST voice/sample': {
+          const body = await readBody();
+          const name = body.clear ? '' : await saveVoiceSample(body);
+          if (body.clear) await clearVoiceSamples();
+          this.settings = saveSettings({ voiceSample: name });
+          this.broadcast('voice_engine', this.voiceEngineStatus());
+          return json(200, { settings: this.settings, engine: this.voiceEngineStatus() });
+        }
+        case 'POST voice/say': {
+          // The engine's audio, relayed chunk by chunk as it is made. 204
+          // tells the window to fall back to the Windows voice.
+          const { text } = await readBody();
+          const abort = new AbortController();
+          res.on('close', () => abort.abort());
+          const upstream = await this.voiceEngine.speak(String(text ?? ''), voiceFor(this.settings), abort.signal).catch(() => null);
+          if (!upstream) { res.writeHead(204); res.end(); return; }
+          if (!upstream.ok) return json(upstream.status, await upstream.json().catch(() => ({ error: 'voice engine failed' })));
+          res.writeHead(200, {
+            'content-type': 'application/octet-stream',
+            'x-sample-rate': upstream.headers.get('x-sample-rate') || '24000',
+            'cache-control': 'no-store',
+          });
+          try {
+            for await (const chunk of upstream.body) res.write(chunk);
+          } catch { /* the window stopped listening */ }
+          res.end();
+          return;
+        }
+        case 'POST voice/stop':
+          return json(200, this.voice.stop());
         case 'GET search/status':
           return json(200, this.webSearchStatus);
         case 'POST search/searxng/reinstall':
@@ -3961,6 +4040,7 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
         case 'POST settings/reset':
           this.settings = resetSettings();
           this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
+          this.voiceEngine.reconcile(this.settings);
           for (const t of this.turns.values()) t.agent.settings = this.settings;
           for (const children of this.subagents.values()) {
             for (const child of children) child.agent.settings = this.settings;
@@ -4113,10 +4193,22 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
     return server;
   }
 
+  voiceEngineStatus(status = this.voiceEngine.state) {
+    return {
+      ...status,
+      hasToken: this.voiceEngine.hasToken(),
+      sample: this.settings.voiceSample || '',
+      voices: BUILTIN_VOICES,
+    };
+  }
+
   async shutdown() {
     await this.sharing.stop().catch(() => {});
     this.vram.stop();
     await this.localSearxng.stop();
+    this.voice.stop();
+    this.voiceEngine.stop();
+    this.desktop.close();
     await Promise.all([...this.browsers.values()].map((b) => b.close().catch(() => {})));
     this.browsers.clear();
     // Dev servers, apps and anything else the agent's commands started --
