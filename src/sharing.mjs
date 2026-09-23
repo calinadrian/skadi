@@ -278,13 +278,20 @@ export class ShareProxy extends EventEmitter {
       const ready = this.ready();
       return sendJson(res, 200, {
         object: 'list',
-        data: ready.map((i) => ({
-          id: i.id,
-          object: 'model',
-          created: Math.floor((i.startedAt || 0) / 1000),
-          owned_by: 'skadi',
-          meta: { label: i.label || i.id, alias: i.alias || null, model: i.model || null },
-        })),
+        data: ready.map((i) => {
+          const entry = {
+            id: i.id,
+            object: 'model',
+            created: Math.floor((i.startedAt || 0) / 1000),
+            owned_by: 'skadi',
+            meta: { label: i.label || i.id, alias: i.alias || null, model: i.model || null },
+          };
+          // The window this model was loaded with. A client that does not
+          // know it guesses -- usually high -- and a conversation that fits
+          // the guess overflows the model, so the request dies mid-turn.
+          if (Number.isFinite(i.ctx) && i.ctx > 0) entry.context_length = i.ctx;
+          return entry;
+        }),
       });
     }
     if (req.method === 'POST' && path === '/v1/chat/completions') {
@@ -303,9 +310,16 @@ export class ShareProxy extends EventEmitter {
       throw withStatus('request body must be JSON', 400);
     }
     const inst = this.resolveInstance(body.model);
+    const ctx = Number.isFinite(inst.ctx) && inst.ctx > 0 ? inst.ctx : null;
     const host = this.skadi.config?.host || '127.0.0.1';
     const target = `http://${host}:${inst.port}/v1/chat/completions`;
-    const upstreamBody = { ...body, model: inst.model || inst.id, stream: Boolean(body.stream) };
+    let upstreamBody = { ...body, model: inst.model || inst.id, stream: Boolean(body.stream) };
+    // A max_tokens at or above the whole window can never fit, whatever the
+    // prompt is; trim it so the request stands a chance instead of being
+    // refused before a single token is generated.
+    if (ctx && Number.isFinite(Number(upstreamBody.max_tokens)) && Number(upstreamBody.max_tokens) >= ctx) {
+      upstreamBody.max_tokens = Math.max(1, ctx - 2048);
+    }
     const controller = new AbortController();
     req.on('close', () => controller.abort());
 
@@ -328,6 +342,17 @@ export class ShareProxy extends EventEmitter {
         payload = JSON.parse(text);
       } catch {
         /* forward it raw */
+      }
+      // A context rejection forwarded raw is a wall of numbers. Say what the
+      // shared model's window actually is, so the client knows where to aim.
+      if (upstream.status === 400 && ctx
+          && /exceed.*context|context.*(exceed|size|length|window)|too many tokens|prompt is too long|input.*too (long|large)/i.test(text)) {
+        const original = (payload?.error?.message || text).toString();
+        payload = {
+          error: {
+            message: `${original} The shared model's context is ${ctx} tokens: point your client's context limit at that number and keep the conversation below it.`,
+          },
+        };
       }
       sendJson(res, upstream.status, payload);
       return;

@@ -53,6 +53,14 @@ const DEFAULTS = {
       model: 'anthropic/claude-sonnet-4.5',
       vision: true,
     },
+    skadiShare: {
+      kind: 'openai',
+      label: 'Skadi Share',
+      // The address of another Skadi's shared endpoint (see that Skadi's
+      // Share panel). Whoever uses this pick pastes the URL they were given
+      // in the model menu, so there is no default.
+      baseUrl: '',
+    },
   },
 };
 
@@ -273,6 +281,7 @@ const MODEL_LIST_TTL_MS = 5 * 60 * 1000;
  */
 export async function listModels(provider) {
   if (provider.kind !== 'openai') return (provider.models || []).map((id) => ({ id }));
+  if (!provider.baseUrl) throw new Error('no endpoint URL is set for this provider yet');
   const baseUrl = provider.baseUrl.replace(/\/+$/, '');
   const cached = modelCache.get(baseUrl);
   if (cached && Date.now() - cached.at < MODEL_LIST_TTL_MS) return cached.models;

@@ -7,6 +7,7 @@ agent and its tools behave, and where everything lives.
 
 - [Projects](#projects)
 - [Providers](#providers)
+- [Sharing](#sharing)
 - [Loading several models](#loading-several-models)
 - [The VRAM forecast](#the-vram-forecast)
 - [Fitting](#fitting)
@@ -78,6 +79,24 @@ and the Profile panel switches between them per profile:
 *Server default* options omit the flag outright, which is how the reference
 command lines run them. Like everything else in the panel, changes apply on
 **Apply & restart**.
+
+## Sharing
+
+The Local AI tab has a **Share** panel that exposes the models you have loaded
+to other machines on your network, each behind its own API key. The panel shows
+the proxy's status — port, whether the proxy is up, how many models and keys
+exist — plus one row per key: the models that key may use, a **Copy** button for
+the address-and-key pair, and **Revoke**. The address and key are what you send
+to the person you are sharing with.
+
+The shared endpoint is OpenAI-compatible (`/v1/models`,
+`/v1/chat/completions`), so any OpenAI client can use it — and so can another
+Skadi. On that Skadi, pick **Skadi Share** in the model menu, paste the shared
+address and the key, and the shared model appears in its model list. The proxy
+publishes each model's actually loaded context window in `/v1/models`, so the
+other Skadi's context meter, `max_tokens` clamping and compaction all use the
+real window instead of a default: an over-long request is answered with a 400
+that names the window, not a raw error from the model server.
 
 ## Loading several models
 
