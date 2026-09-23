@@ -17,6 +17,10 @@ export const DEFAULT_SETTINGS = {
   // UI theme. 'polar' is the standard blue-grey dark; 'oled' is pure black
   // with neutral greys, for OLED panels where fully-off pixels stay off.
   theme: 'polar',
+  // OLED burn-in care: a stripped-down top bar (static, always-lit chrome
+  // is what burns in), dimmed icons, a slow 1px shift of what remains, and a
+  // dimmed screen after a few idle minutes. Turned on with the OLED theme.
+  oledCare: false,
   // Look for a newer release on GitHub now and then, and offer it in the
   // window. Nothing is installed without being asked.
   updateCheck: true,

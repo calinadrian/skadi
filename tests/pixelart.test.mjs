@@ -170,3 +170,32 @@ test('shade can be limited to one shape so a shared colour elsewhere is untouche
   assert.equal(c.get(6, 1), 7, 'the chosen shape is lit');
   assert.equal(c.get(0, 0), 1, 'the other area of the same colour is left alone');
 });
+
+test('text safeguards: overlap, overflow, painting over, alignment', () => {
+  const c = Canvas.create({ width: 64, height: 40, background: 12 });
+  // Centred inside a box, measured correctly: "SEP" is 11px wide.
+  assert.match(applyOp(c, { op: 'text', text: 'SEP', x1: 0, x2: 63, y: 2, align: 'center', color: 0 }), /at \(26,2\)-\(36,6\), 11x5px/);
+  // A second text on top of the first is refused, naming the first.
+  assert.throws(() => applyOp(c, { op: 'text', text: '2026', x: 30, y: 2, color: 2 }), /overlap the text "SEP"/);
+  // Running off the canvas is refused with a fix.
+  assert.throws(() => applyOp(c, { op: 'text', text: 'SEPTEMBER 2026', x: 20, y: 20, color: 0 }), /run off the 64x40 canvas/);
+  // Too wide for its box.
+  assert.throws(() => applyOp(c, { op: 'text', text: 'SEPTEMBER', x1: 0, x2: 20, y: 20, align: 'center', color: 0 }), /box is only 21px wide/);
+  // A marker drawn after the text goes behind it; the letters survive.
+  applyOp(c, { op: 'text', text: '23', x: 10, y: 20, color: 0 });
+  const glyphs = c.texts.at(-1).glyphs.map((i) => c.px[i]);
+  assert.match(applyOp(c, { op: 'circle', cx: 13, cy: 22, r: 5, color: 5 }), /kept \d+px of text/);
+  assert.deepEqual(c.texts.at(-1).glyphs.map((i) => c.px[i]), glyphs);
+  // Noise leaves the whole text box alone, gaps included.
+  const box = c.texts[0];
+  const inside = () => { const v = []; for (let y = box.y1; y <= box.y2; y++) for (let x = box.x1; x <= box.x2; x++) v.push(c.get(x, y)); return v; };
+  const snap = inside();
+  applyOp(c, { op: 'noise', colors: [3, 4], density: 0.5 });
+  assert.deepEqual(inside(), snap);
+  // clear removes a text so it can be rewritten.
+  applyOp(c, { op: 'clear', x1: box.x1, y1: box.y1, x2: box.x2, y2: box.y2 });
+  assert.ok(!c.texts.includes(box));
+  assert.doesNotThrow(() => applyOp(c, { op: 'text', text: 'SEP 26', x1: 0, x2: 63, y: 2, align: 'center', color: 0 }));
+  // Text records survive a save/load.
+  assert.equal(Canvas.fromJSON(JSON.parse(JSON.stringify(c.toJSON()))).texts.length, c.texts.length);
+});

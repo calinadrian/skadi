@@ -41,6 +41,10 @@ static class Native
     [DllImport("user32.dll")] public static extern bool ReleaseCapture();
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] public static extern int GetSystemMetricsForDpi(int index, uint dpi);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+    public const int SM_CYFRAME = 33;
+    public const int SM_CXPADDEDBORDER = 92;
 
     // PER_MONITOR_AWARE_V2: crisp on mixed-DPI setups, and the non-client
     // metrics we depend on scale correctly.
@@ -80,7 +84,9 @@ class ShellForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1440, 920);
         MinimumSize = new Size(900, 560);
-        BackColor = Color.FromArgb(7, 10, 14); // matches the UI's --bg
+        // Black: the frame only shows while resizing, and any tint reads as a
+        // coloured border on the OLED theme.
+        BackColor = Color.Black;
         DoubleBuffered = true;
 
         try
@@ -90,7 +96,7 @@ class ShellForm : Form
         catch (Exception) { /* the window just uses the default icon */ }
 
         view.Dock = DockStyle.Fill;
-        view.DefaultBackgroundColor = Color.FromArgb(7, 10, 14);
+        view.DefaultBackgroundColor = Color.Black;
         Controls.Add(view);
 
         Load += async (s, e) => await Start();
@@ -125,6 +131,14 @@ class ShellForm : Form
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.AreBrowserAcceleratorKeysEnabled = true; // keep F12 and reload
+
+        // The page's own right-click menu offers Paste, which reads the
+        // clipboard. Allow that for Skadi's page without a browser prompt.
+        core.PermissionRequested += (s, e) =>
+        {
+            if (e.PermissionKind == CoreWebView2PermissionKind.ClipboardRead)
+                e.State = CoreWebView2PermissionState.Allow;
+        };
 
         // The page names itself (document.title); the taskbar follows.
         core.DocumentTitleChanged += (s, e) =>
@@ -214,10 +228,13 @@ class ShellForm : Form
 
     void SyncMaximizeState()
     {
-        // A maximised window with WS_THICKFRAME hangs its borders off the edge
-        // of the monitor; padding pulls the content back into view.
+        // A maximised window with WS_THICKFRAME hangs its frame off the edge of
+        // the monitor. Windows already keeps the sides and bottom in view (they
+        // stay non-client); only the top, which WM_NCCALCSIZE gave to the
+        // client area, needs pulling back in. Padding the other sides too left
+        // a strip of the form's background around the page.
         Padding = WindowState == FormWindowState.Maximized
-            ? new Padding(8, 8, 8, 8) : new Padding(0);
+            ? new Padding(0, MaximizedTopInset(), 0, 0) : new Padding(0);
 
         if (view.CoreWebView2 != null)
         {
@@ -229,6 +246,18 @@ class ShellForm : Form
             }
             catch (Exception) { /* the page may not be loaded yet */ }
         }
+    }
+
+    int MaximizedTopInset()
+    {
+        try
+        {
+            uint dpi = Native.GetDpiForWindow(Handle);
+            if (dpi == 0) dpi = 96;
+            return Native.GetSystemMetricsForDpi(Native.SM_CYFRAME, dpi)
+                 + Native.GetSystemMetricsForDpi(Native.SM_CXPADDEDBORDER, dpi);
+        }
+        catch (Exception) { return 8; } // Windows 10 before 1607
     }
 
     protected override void OnResize(EventArgs e)

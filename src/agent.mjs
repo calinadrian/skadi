@@ -4,6 +4,7 @@
 // can render it as it happens rather than waiting for the turn to finish.
 import { EventEmitter } from 'node:events';
 import { ToolError, suggestToolName } from './tools.mjs';
+import { autoModeRisk, describeAction } from './safeguards.mjs';
 import { streamCompletion, INVALID_ARGS_KEY, looseToolArguments } from './providers.mjs';
 import {
   compactionSettings,
@@ -50,7 +51,7 @@ const LOCAL_NOTE = `- You are a quantised local model with limited context. Be e
 const PERMISSION_NOTES = {
   acceptEdits: 'File edits apply immediately without review; shell commands still ask first. Verify with tests and report what changed.',
   plan: 'PLAN MODE — research only. Read files and explore; do NOT create, edit or delete files. Shell commands still ask first. End your turn with a concrete plan and wait — the user approves it by switching modes. Do not retry blocked edits.',
-  auto: 'AUTO MODE — your file edits and commands run without review. Stay strictly within the request; do not escalate (no deploys, no mass deletes, no pushing secrets).',
+  auto: 'AUTO MODE — routine file edits and commands run without review. Stay strictly within the request; do not escalate (no deploys, no mass deletes, no pushing secrets). A safeguard sends destructive, outward-facing or system-level actions (force deletes, git push/reset --hard, publishing, download-and-run, registry/firewall/service changes, credentials, files outside the workspace) back to the user for approval — never try to work around it by rephrasing or splitting the command.',
   dontAsk: "DON'T-ASK MODE — anything that would need approval is denied automatically. Work with reads only, or tell the user exactly what needs enabling.",
   bypassPermissions: 'BYPASS MODE — all permission checks are skipped. Be extra careful: every command runs as-is.',
 };
@@ -164,6 +165,8 @@ export class Agent extends EventEmitter {
     // prompt, this is evaluated immediately before every provider request, so
     // an execution plan edited mid-turn becomes authoritative next round.
     this.liveGuidance = null;
+    // Set by the caller for report-only tasks; see run().
+    this.readOnly = false;
     // Returns { override, snapshot } for the current session: the user's manual
     // ledger corrections and the counters saved by earlier turns.
     this.liveLedger = null;
@@ -280,6 +283,9 @@ export class Agent extends EventEmitter {
     const ledger = createProgressLedger(objectiveFromMessages(messages));
     seedLedger(ledger, this.liveLedger?.()?.snapshot);
     applyLedgerOverride(ledger, this.liveLedger?.()?.override);
+    // An investigation-only task (a Mission Control research or bug hunt)
+    // mentions fixes without wanting any: never push it toward an edit.
+    if (this.readOnly) ledger.implementation = false;
     const budgets = taskBudgets(this.settings, ledger.complexity);
     const maxRounds = budgets.maxRounds;
     const bounded = maxRounds > 0;
@@ -809,11 +815,14 @@ export class Agent extends EventEmitter {
     // Mode baselines, Claude-style. acceptEdits auto-approves file-side
     // mutations but still gates shell commands; auto and bypassPermissions
     // run everything without asking.
+    // Auto mode keeps a safety net: destructive, outward-facing or
+    // system-level actions fall back to the approval prompt.
+    const autoRisk = mode === 'auto' && tool.mutates ? autoModeRisk(name, args) : null;
     const autoApprove =
-      mode === 'bypassPermissions' || mode === 'auto' ||
+      mode === 'bypassPermissions' || (mode === 'auto' && !autoRisk) ||
       (mode === 'acceptEdits' && name !== 'run_command');
 
-    if (needsApproval && !autoApprove) {
+    if ((needsApproval || autoRisk) && !autoApprove) {
       // dontAsk: anything that would prompt is denied instead of asked.
       if (mode === 'dontAsk') {
         return {
@@ -824,11 +833,15 @@ export class Agent extends EventEmitter {
           denied: true,
         };
       }
-      this.emit('approval_request', { id: call.id, name, args });
-      const allowed = await this.approve({ id: call.id, name, args });
+      const safeguard = autoRisk ? `Auto-mode safeguard: ${autoRisk}` : undefined;
+      const summary = describeAction(name, args);
+      this.emit('approval_request', { id: call.id, name, args, safeguard, summary });
+      const allowed = await this.approve({ id: call.id, name, args, safeguard, summary });
       if (!allowed) {
         return {
-          content: 'The user declined this action. Do not retry it; ask what they would prefer.',
+          content: autoRisk
+            ? `Auto-mode safeguard held this action (${autoRisk}) and the user declined it. Do not retry or work around it; ask what they would prefer.`
+            : 'The user declined this action. Do not retry it; ask what they would prefer.',
           ok: false,
           denied: true,
         };

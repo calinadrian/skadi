@@ -90,6 +90,9 @@ export class Canvas {
     this.h = height;
     this.palette = palette;
     this.px = pixels ? Int16Array.from(pixels) : new Int16Array(width * height).fill(-1);
+    // Text drawn so far: its box, and which pixels are the letters. Later ops
+    // may paint behind it but never over it, and new text may not collide.
+    this.texts = [];
   }
 
   static create({ width, height, palette, background = -1 }) {
@@ -101,7 +104,11 @@ export class Canvas {
     return canvas;
   }
 
-  clone() { return new Canvas(this.w, this.h, [...this.palette], this.px); }
+  clone() {
+    const copy = new Canvas(this.w, this.h, [...this.palette], this.px);
+    copy.texts = this.texts.map((t) => ({ ...t, glyphs: [...t.glyphs] }));
+    return copy;
+  }
 
   /** A palette index from an index, a hex colour, or a "transparent" word. */
   color(value) {
@@ -403,18 +410,35 @@ export class Canvas {
     return n;
   }
 
+  /** Size of a text block in pixels: 3x5 glyphs, 1px gaps, 1px line gap. */
+  static measureText(value, scale = 1) {
+    const lines = String(value).split('\n');
+    const longest = Math.max(...lines.map((l) => [...l].length));
+    return {
+      width: longest ? longest * 4 * scale - scale : 0,
+      height: lines.length * 6 * scale - scale,
+    };
+  }
+
   text(x, y, value, c, scale = 1) {
     let n = 0;
     let cx = x;
+    const glyphs = [];
     for (const ch of String(value).toUpperCase()) {
       if (ch === '\n') { cx = x; y += 6 * scale; continue; }
       const glyph = FONT[ch] || FONT['?'];
       glyph.forEach((row, gy) => [...row].forEach((bit, gx) => {
         if (bit !== '#') return;
-        for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) n += this.set(cx + gx * scale + sx, y + gy * scale + sy, c);
+        for (let sy = 0; sy < scale; sy++) {
+          for (let sx = 0; sx < scale; sx++) {
+            const px = cx + gx * scale + sx, py = y + gy * scale + sy;
+            if (this.set(px, py, c)) { n++; glyphs.push(py * this.w + px); }
+          }
+        }
       }));
       cx += 4 * scale;
     }
+    this.lastGlyphs = glyphs;
     return n;
   }
 
@@ -483,7 +507,11 @@ export class Canvas {
       if (touchesBorder && transparent > filled * 0.2) out.push('The drawing touches the canvas edge; leave 1px of transparent padding (op "shift" can move it).');
     }
     const [top, topCount] = [...counts.entries()].filter(([v]) => v >= 0).sort((a, b) => b[1] - a[1])[0];
-    if (topCount > 96 && topCount / filled > 0.6) out.push(`Colour ${top} covers ${Math.round((100 * topCount) / filled)}% of the drawing as one flat area: add texture (op "noise" with density 0.15) or shading (op "shade").`);
+    if (topCount > 96 && topCount / filled > 0.6 && !this.texts.length) out.push(`Colour ${top} covers ${Math.round((100 * topCount) / filled)}% of the drawing as one flat area: add texture (op "noise" with density 0.15) or shading (op "shade").`);
+    for (const t of this.texts) {
+      const lost = t.glyphs.filter((i) => this.px[i] !== t.color).length;
+      if (lost) out.push(`Text "${t.value}" has ${lost} damaged pixels: clear its box (${t.x1},${t.y1})-(${t.x2},${t.y2}) and write it again.`);
+    }
     return out;
   }
 
@@ -529,12 +557,18 @@ export class Canvas {
   }
 
   toJSON() {
-    return { w: this.w, h: this.h, palette: this.palette, px: Buffer.from(Uint8Array.from(this.px, (v) => v + 1)).toString('base64') };
+    return {
+      w: this.w, h: this.h, palette: this.palette,
+      px: Buffer.from(Uint8Array.from(this.px, (v) => v + 1)).toString('base64'),
+      texts: this.texts,
+    };
   }
 
   static fromJSON(data) {
     const bytes = Buffer.from(String(data.px || ''), 'base64');
-    return new Canvas(data.w, data.h, data.palette, Array.from(bytes, (v) => v - 1));
+    const canvas = new Canvas(data.w, data.h, data.palette, Array.from(bytes, (v) => v - 1));
+    canvas.texts = Array.isArray(data.texts) ? data.texts : [];
+    return canvas;
   }
 }
 
@@ -854,8 +888,53 @@ const OP_ALIASES = {
 export const OPS = ['rect', 'line', 'pixel', 'pixels', 'row', 'column', 'circle', 'ellipse', 'triangle', 'rotated_rect',
   'noise', 'noise_circle', 'voronoi', 'gradient', 'fill', 'outline', 'shade', 'mirror', 'replace', 'shift', 'clear', 'stamp', 'text'];
 
-/** Apply one drawing operation. Returns a one-line description of what changed. */
+// Ops that move or rewrite the whole picture: text records cannot follow
+// them, so they are dropped rather than enforced.
+const TEXT_RESETS = new Set(['shift', 'mirror', 'replace', 'stamp']);
+// Texture ops that would speckle the letters and the gaps between them.
+const TEXTURES = new Set(['noise', 'noise_circle', 'voronoi', 'gradient', 'shade']);
+
+/**
+ * Apply one drawing operation. Returns a one-line description of what changed.
+ *
+ * Safeguard: text is kept legible. Anything drawn after a text may go behind
+ * it (a highlight circle under a date) but its letters are put back; texture
+ * ops also leave the text's box alone. "clear" over a text removes it.
+ */
 export function applyOp(canvas, rawOp, lookup = () => null) {
+  const name = String(rawOp?.op ?? rawOp?.type ?? rawOp?.tool ?? rawOp?.action ?? '').trim().toLowerCase();
+  const kind = OP_ALIASES[name] || name;
+  if (!canvas.texts.length || kind === 'text') return drawOp(canvas, rawOp, lookup);
+  if (TEXT_RESETS.has(kind)) {
+    const result = drawOp(canvas, rawOp, lookup);
+    canvas.texts = [];
+    return result;
+  }
+  const before = Int16Array.from(canvas.px);
+  const result = drawOp(canvas, rawOp, lookup);
+  if (kind === 'clear') {
+    canvas.texts = canvas.texts.filter((t) => t.glyphs.some((i) => canvas.px[i] === t.color));
+    return result;
+  }
+  let kept = 0;
+  for (const t of canvas.texts) {
+    const keep = TEXTURES.has(kind)
+      ? boxIndices(canvas, t)
+      : t.glyphs;
+    for (const i of keep) {
+      if (canvas.px[i] !== before[i]) { canvas.px[i] = before[i]; kept++; }
+    }
+  }
+  return kept ? `${result} (kept ${kept}px of text on top; "clear" a text's box to change it)` : result;
+}
+
+function boxIndices(canvas, t) {
+  const out = [];
+  for (let y = t.y1; y <= t.y2; y++) for (let x = t.x1; x <= t.x2; x++) out.push(y * canvas.w + x);
+  return out;
+}
+
+function drawOp(canvas, rawOp, lookup = () => null) {
   const op = rawOp && typeof rawOp === 'object' ? rawOp : {};
   const name = String(op.op ?? op.type ?? op.tool ?? op.action ?? '').trim().toLowerCase();
   const kind = OP_ALIASES[name] || name;
@@ -989,7 +1068,58 @@ export function applyOp(canvas, rawOp, lookup = () => null) {
     case 'text': {
       const value = String(pick(op, 'text', 'value', 'string') ?? '');
       if (!value) throw new PixelError('"text" needs "text"');
-      return `text "${value}": ${canvas.text(num(op.x ?? 0, 'x'), num(op.y ?? 0, 'y'), value, color(), Math.max(1, Math.min(8, Number(op.scale) || 1)))}px`;
+      const scale = Math.max(1, Math.min(8, Number(op.scale) || 1));
+      const c = color();
+      const { width, height } = Canvas.measureText(value, scale);
+      // Placement: a plain x,y top-left corner, or aligned inside a box
+      // (x1..x2 / y1..y2, defaulting to the whole canvas).
+      const align = String(op.align || 'left').toLowerCase();
+      const valign = String(op.valign || 'top').toLowerCase();
+      const bx1 = op.x1 !== undefined ? num(op.x1, 'x1') : op.x !== undefined ? num(op.x, 'x') : 0;
+      const bx2 = op.x2 !== undefined ? num(op.x2, 'x2') : canvas.w - 1;
+      const by1 = op.y1 !== undefined ? num(op.y1, 'y1') : op.y !== undefined ? num(op.y, 'y') : 0;
+      const by2 = op.y2 !== undefined ? num(op.y2, 'y2') : canvas.h - 1;
+      const room = bx2 - bx1 + 1;
+      let x = align === 'center' || align === 'centre' ? bx1 + Math.floor((room - width) / 2)
+        : align === 'right' ? bx2 - width + 1 : bx1;
+      let y = valign === 'middle' || valign === 'center' || valign === 'centre' ? by1 + Math.floor((by2 - by1 + 1 - height) / 2)
+        : valign === 'bottom' ? by2 - height + 1 : by1;
+      const x2 = x + width - 1, y2 = y + height - 1;
+      const size = `"${value}" at scale ${scale} is ${width}x${height}px (each character is ${4 * scale}px wide including its gap)`;
+      if (width > room && (op.x2 !== undefined || align !== 'left')) {
+        throw new PixelError(`${size} but the box is only ${room}px wide. Use a smaller scale, shorter text (e.g. "SEP 2026"), or a wider box.`);
+      }
+      if (x < 0 || y < 0 || x2 >= canvas.w || y2 >= canvas.h) {
+        const fitX = Math.max(0, Math.floor((canvas.w - width) / 2));
+        throw new PixelError(`${size}; placed at (${x},${y}) it would run off the ${canvas.w}x${canvas.h} canvas. ` +
+          (width <= canvas.w ? `x=${fitX} centres it, or pass "align":"center".` : 'Use a smaller scale or shorter text.'));
+      }
+      // Two texts must not touch: keep at least 1px between them.
+      const hit = canvas.texts.find((t) => x <= t.x2 + 1 && x2 >= t.x1 - 1 && y <= t.y2 + 1 && y2 >= t.y1 - 1);
+      if (hit) {
+        throw new PixelError(`${size} and placed at (${x},${y})-(${x2},${y2}) it would overlap the text "${hit.value}" at (${hit.x1},${hit.y1})-(${hit.x2},${hit.y2}). ` +
+          'Move it, or write both as one text ("SEPTEMBER 2026"). To replace that text, "clear" its box first.');
+      }
+      // Stray texture specks touching the letters make them unreadable. If
+      // the area right around the text is one main colour with a few specks,
+      // settle those specks into the main colour first.
+      const counts = new Map();
+      const area = [];
+      for (let py = y - 1; py <= y2 + 1; py++) {
+        for (let px = x - 1; px <= x2 + 1; px++) {
+          if (!canvas.inside(px, py)) continue;
+          const v = canvas.get(px, py);
+          area.push([px, py, v]);
+          counts.set(v, (counts.get(v) || 0) + 1);
+        }
+      }
+      const [main, mainCount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (mainCount < area.length && mainCount / area.length >= 0.8) {
+        for (const [px, py, v] of area) if (v !== main && v !== c) canvas.set(px, py, main);
+      }
+      const n = canvas.text(x, y, value, c, scale);
+      canvas.texts.push({ value, x1: x, y1: y, x2, y2, color: c, glyphs: canvas.lastGlyphs, scale });
+      return `text "${value}" at (${x},${y})-(${x2},${y2}), ${width}x${height}px: ${n}px`;
     }
     default:
       throw new PixelError(`unknown op "${name || '(missing)'}". Use one of: ${OPS.join(', ')}`);

@@ -2,7 +2,7 @@
 // Entry point. Starts the local UI server and opens a browser at it.
 //
 //   node skadi.mjs              start on the configured port
-//   node skadi.mjs --port 7788  override the port
+//   node skadi.mjs --port 7788  override the port (or set PORT)
 //   node skadi.mjs --no-open    do not launch a browser
 import { spawn } from 'node:child_process';
 import { Skadi } from './src/server.mjs';
@@ -16,7 +16,7 @@ const value = (name, fallback) => {
 };
 
 const settings = loadSettings();
-const port = Number(value('--port', settings.uiPort || 7777));
+const port = Number(value('--port', process.env.PORT || settings.uiPort || 7777));
 
 const skadi = new Skadi();
 skadi.listen(port);

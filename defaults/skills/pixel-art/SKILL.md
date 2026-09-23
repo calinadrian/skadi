@@ -62,6 +62,48 @@ sprite if the palette has a dark navy or purple; it looks softer.
 - **Whole-number scaling only** (2x, 3x, 4x). Never let a browser or canvas
   smooth pixel art.
 
+## Text and layouts (calendars, signs, UI, title cards)
+
+Text is where small pixel art goes wrong: letters overlap, run off the edge,
+or get speckled by noise. Plan it before you draw.
+
+- **Measure first.** Each character is 3x5 pixels and takes `4 × scale`
+  pixels of width (3 + a 1px gap). Width = `characters × 4 × scale − scale`.
+  "SEPTEMBER 2026" (14 characters) is 55px wide at scale 1, 111px at scale 2.
+  If it does not fit, shorten it ("SEP 2026") or lower the scale; never let
+  two texts share the same space.
+- **One text per label.** Write "SEPTEMBER 2026" as one text, not "SEPTEMBER"
+  and then "2026" squeezed next to it. Two texts must have at least 1px
+  between them; the tool refuses an overlapping text and tells you where the
+  other one is.
+- **Centre with the box, not by guessing:**
+  `{"op":"text","text":"SEP 2026","x1":2,"x2":93,"y1":2,"y2":10,"align":"center","valign":"middle","color":1}`.
+  The reply says where it landed.
+- **Draw order: background → texture → boxes and lines → markers → text.**
+  Put `noise` on the background before any text and keep it very light
+  (density ≤ 0.1) on anything text will sit on, or skip it. Text is always
+  drawn last. The tool keeps text on top of anything drawn later, but it
+  still looks best when you draw things in this order.
+- **Contrast.** Dark text on light paper or light text on dark: at least
+  two steps apart in brightness. Never put text on a busy texture.
+- **Markers behind text, not over it.** To highlight a date, draw a ring
+  (`circle` with `"fill": false`) or a small filled box around the number
+  *before* writing the number, and pick a marker colour the digits stay
+  readable on.
+- **To change text,** `clear` its box (the reply gives the coordinates),
+  then write it again.
+
+**Calendar (kind "ui", e.g. 96x80):** a month has 7 columns and up to 6
+week rows. At scale 1 two digits are 7px wide, so use cells 13px wide and
+10px tall: 7 × 13 = 91px, plus 2px margin on each side, so a 96px-wide canvas.
+Layout from top: 1px border, title bar (height 11, the month name centred
+in it), a weekday row (one letter per column, centred in its cell), then the
+6 week rows. Work out each cell's x1/x2 as `2 + col × 13` to `2 + col × 13 + 12`
+and write each number centred in its cell with `align:"center"`. Look up
+which weekday the 1st falls on before placing the days. Draw grid lines
+before the numbers, the highlight marker before its number, and add
+no noise inside the grid.
+
 ## Recipes
 
 **Item icon (16x16 or 32x32, kind "icon"):** main shape with rect/ellipse/
@@ -105,6 +147,12 @@ false`, a light `row` on top and a dark `row` at the bottom, `text` centred.
 ## If something goes wrong
 
 - A `SKIPPED` op in the reply names the problem; resend only that op, fixed.
+  For text it gives the measured size and where it would fit: use those
+  numbers, do not just nudge x by 1.
+- "kept Npx of text on top" means a later shape tried to paint over text. That
+  is fine for a marker behind a date; otherwise, move the shape.
+- "Text ... has damaged pixels" in Suggestions: `clear` that box and write the
+  text again.
 - Colours look wrong: you used an index outside the palette. Read the palette
   line from `pixel_new` again.
 - Shape in the wrong place: check the grid rows (y) and ruler (x) and move it

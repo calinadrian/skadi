@@ -17,13 +17,21 @@ test('local SearXNG binds only to loopback and serves JSON', () => {
 });
 
 /** A fake machine: Python 3.12 on PATH, a working tar, a SearXNG that answers. */
-function fakeMachine(dir, { python = '3 12' } = {}) {
+function fakeMachine(dir, { python = '3 12', platform = 'win32', download = true } = {}) {
   const calls = [];
+  const fetched = [];
   const run = async (command, args) => {
     calls.push([command, args]);
     if (args.includes('-c')) {
+      // Skadi's own downloaded Python always works once unpacked.
+      if (/python[\\/]tools[\\/]python\.exe$/.test(command)) return { stdout: '3 12' };
       if (!python) throw new Error('not found');
       return { stdout: python };
+    }
+    if (args[0] === '-xf') {
+      const dest = args[args.indexOf('-C') + 1];
+      await mkdir(join(dest, 'tools'), { recursive: true });
+      await writeFile(join(dest, 'tools', 'python.exe'), '');
     }
     if (args[0] === '-xzf') {
       const unpack = args[args.indexOf('-C') + 1];
@@ -45,10 +53,13 @@ function fakeMachine(dir, { python = '3 12' } = {}) {
     spawned.push({ command, args, options });
     return { pid: 4321, exitCode: null, on() {} };
   };
-  const fetcher = async (url) => (url.endsWith('/healthz')
-    ? { ok: true }
-    : { ok: true, arrayBuffer: async () => new ArrayBuffer(8) });
-  return { calls, spawned, service: new LocalSearxng({ dir, run, spawnProcess, fetcher, platform: 'win32' }) };
+  const fetcher = async (url) => {
+    fetched.push(String(url));
+    if (url.endsWith('/healthz')) return { ok: true };
+    if (/nuget/.test(url) && !download) return { ok: false, status: 503 };
+    return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
+  };
+  return { calls, fetched, spawned, service: new LocalSearxng({ dir, run, spawnProcess, fetcher, platform, pythonDirs: [] }) };
 }
 
 test('turning it on installs SearXNG natively once, then starts it without Docker', async () => {
@@ -81,12 +92,32 @@ test('turning it on installs SearXNG natively once, then starts it without Docke
   await service.stop();
 });
 
-test('without Python the switch explains what to install instead of failing silently', async () => {
+test('without Python on Windows, Skadi downloads its own copy and carries on', async () => {
   const dir = join(await mkdtemp(join(tmpdir(), 'skadi-sx-')), 'searxng');
-  const { service } = fakeMachine(dir, { python: '' });
+  const { calls, fetched, service } = fakeMachine(dir, { python: '' });
+  await service.start({ searxngAutoStart: true });
+  assert.equal(service.state.state, 'ready');
+  assert.ok(fetched.some((url) => /api\.nuget\.org\/v3-flatcontainer\/python(arm64|x86)?\/3\.12\.10\//.test(url)), 'official portable Python is fetched');
+  const venv = calls.find(([, args]) => args.includes('venv'));
+  assert.match(venv[0], /python[\\/]tools[\\/]python\.exe$/, 'the venv is made from the downloaded Python');
+  assert.ok(existsSync(join(dir, 'python', 'tools', 'python.exe')));
+  await service.stop();
+});
+
+test('if the Python download fails, the error says what to do', async () => {
+  const dir = join(await mkdtemp(join(tmpdir(), 'skadi-sx-')), 'searxng');
+  const { service } = fakeMachine(dir, { python: '', download: false });
   await assert.rejects(service.start({ searxngAutoStart: true }), /Python 3\.10 or newer/);
   assert.equal(service.state.state, 'error');
-  assert.match(service.state.error, /python\.org/);
+  assert.match(service.state.error, /HTTP 503/);
+  assert.match(service.state.error, /Reinstall|python\.org/);
+});
+
+test('on Linux without Python the error names the package to install', async () => {
+  const dir = join(await mkdtemp(join(tmpdir(), 'skadi-sx-')), 'searxng');
+  const { fetched, service } = fakeMachine(dir, { python: '', platform: 'linux' });
+  await assert.rejects(service.start({ searxngAutoStart: true }), /python3-venv/);
+  assert.equal(fetched.some((url) => /nuget/.test(url)), false, 'no Windows download on Linux');
 });
 
 test('web search falls back to DuckDuckGo while the local SearXNG is not ready', async () => {

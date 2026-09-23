@@ -113,7 +113,7 @@ export function pixelTools(studio, ctx, { onChange = () => {} } = {}) {
                 'fill {x,y,color} (bucket); gradient {x1,y1,x2,y2,colors:[top..bottom],direction} (dithered sky/background);',
                 'noise {x1,y1,x2,y2,colors,density,on,seed} (texture; density 0.1-0.3 speckles, "on" limits it to one colour); noise_circle {cx,cy,r,colors}; voronoi {x1,y1,x2,y2,colors,cells} (stones);',
                 'outline {color} (1px outline around everything drawn); shade {target,highlight,shadow,x,y} (light top-left, shadow bottom-right; x,y = a point inside the one shape to shade, else every pixel of that colour);',
-                'mirror {axis:"x",from:"left"} (symmetry); replace {from,to}; shift {dx,dy}; clear {x1,y1,x2,y2}; stamp {from,x,y,flip}; text {x,y,text,color,scale} (3x5 font).',
+                'mirror {axis:"x",from:"left"} (symmetry); replace {from,to}; shift {dx,dy}; clear {x1,y1,x2,y2}; stamp {from,x,y,flip}; text {x,y,text,color,scale} or {x1,x2,y1,y2,align:"center",valign:"middle",...} (3x5 font, each character 4*scale px wide; draw text LAST, it stays on top and cannot overlap other text).',
               ].join(' '),
               items: { type: 'object' },
             },

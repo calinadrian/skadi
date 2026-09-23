@@ -13,7 +13,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
-import { existsSync, openSync, closeSync } from 'node:fs';
+import { existsSync, openSync, closeSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, writeFile, rm, rename, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ROOT } from './config.mjs';
@@ -21,6 +21,17 @@ import { ROOT } from './config.mjs';
 const exec = promisify(execFile);
 export const SEARXNG_SOURCE = 'https://codeload.github.com/searxng/searxng/tar.gz/refs/heads/master';
 const MIN_PYTHON = [3, 10];
+
+// When no usable Python is on the machine (Windows), Skadi fetches its own:
+// python.org's official NuGet build, a plain zip with venv and pip included.
+// It unpacks into the searxng folder, needs no admin rights or installer, and
+// never touches PATH or the user's other Pythons.
+export const PORTABLE_PYTHON_VERSION = '3.12.10';
+export function portablePythonUrl(arch = process.arch) {
+  const id = arch === 'arm64' ? 'pythonarm64' : arch === 'ia32' ? 'pythonx86' : 'python';
+  const v = PORTABLE_PYTHON_VERSION;
+  return `https://api.nuget.org/v3-flatcontainer/${id}/${v}/${id}.${v}.nupkg`;
+}
 
 export function localSearxngUrl(settings = {}) {
   const port = Math.min(65535, Math.max(1, Number(settings.searxngPort) || 8888));
@@ -35,6 +46,9 @@ export function searxngPaths(dir) {
     src: join(dir, 'src'),
     venv: join(dir, 'venv'),
     python: join(dir, 'venv', win ? 'Scripts' : 'bin', win ? 'python.exe' : 'python'),
+    runtime: join(dir, 'python'),
+    runtimePython: join(dir, 'python', 'tools', 'python.exe'),
+    runtimeArchive: join(dir, 'python.nupkg'),
     shim: join(dir, 'shim'),
     settings: join(dir, 'settings.yml'),
     marker: join(dir, 'install.json'),
@@ -80,6 +94,28 @@ export function pythonCandidates(platform = process.platform) {
     : [['python3', []], ['python', []]];
 }
 
+/**
+ * Pythons installed but not on PATH: the python.org installer's default
+ * folders (per user and all users). Newest first.
+ */
+export function knownPythonDirs(env = process.env) {
+  const roots = [
+    env.LOCALAPPDATA && join(env.LOCALAPPDATA, 'Programs', 'Python'),
+    env.ProgramFiles,
+    env['ProgramFiles(x86)'],
+  ].filter(Boolean);
+  const found = [];
+  for (const root of roots) {
+    let names = [];
+    try { names = readdirSync(root); } catch { continue; }
+    for (const name of names) {
+      const m = /^Python3(\d+)/i.exec(name);
+      if (m && Number(m[1]) >= MIN_PYTHON[1]) found.push([Number(m[1]), join(root, name, 'python.exe')]);
+    }
+  }
+  return found.sort((a, b) => b[0] - a[0]).map(([, path]) => path).filter((path) => existsSync(path));
+}
+
 export class LocalSearxng {
   constructor({
     dir = join(ROOT, 'searxng'),
@@ -88,7 +124,11 @@ export class LocalSearxng {
     fetcher = fetch,
     platform = process.platform,
     onStatus = () => {},
+    pythonDirs = null,
+    arch = process.arch,
   } = {}) {
+    this.pythonDirs = pythonDirs;
+    this.arch = arch;
     this.paths = searxngPaths(dir);
     this.run = run;
     this.spawnProcess = spawnProcess;
@@ -132,8 +172,14 @@ export class LocalSearxng {
 
   /** A Python new enough for SearXNG, as [command, leading args]. */
   async findPython() {
-    const probe = 'import sys; print(sys.version_info[0], sys.version_info[1])';
-    for (const [command, args] of pythonCandidates(this.platform)) {
+    const probe = 'import sys, venv, ensurepip; print(sys.version_info[0], sys.version_info[1])';
+    const candidates = [
+      // Skadi's own copy from an earlier install comes first.
+      ...(existsSync(this.paths.runtimePython) ? [[this.paths.runtimePython, []]] : []),
+      ...pythonCandidates(this.platform),
+      ...(this.platform === 'win32' ? (this.pythonDirs ?? knownPythonDirs()).map((path) => [path, []]) : []),
+    ];
+    for (const [command, args] of candidates) {
       try {
         const { stdout } = await this.run(command, [...args, '-c', probe], { windowsHide: true, timeout: 20_000 });
         const [major, minor] = String(stdout).trim().split(/\s+/).map(Number);
@@ -141,6 +187,22 @@ export class LocalSearxng {
       } catch { /* not this one */ }
     }
     return null;
+  }
+
+  /** Windows: download python.org's portable build into the searxng folder. */
+  async installPortablePython() {
+    const p = this.paths;
+    this.setStatus('installing', { step: `Python not found: downloading Python ${PORTABLE_PYTHON_VERSION} for Skadi (about 15 MB, one time)…` });
+    await mkdir(p.dir, { recursive: true });
+    const response = await this.fetcher(portablePythonUrl(this.arch), { signal: AbortSignal.timeout(300_000) });
+    if (!response.ok) throw new Error(`could not download Python (HTTP ${response.status})`);
+    await writeFile(p.runtimeArchive, Buffer.from(await response.arrayBuffer()));
+    this.setStatus('installing', { step: 'Unpacking Python…' });
+    await rm(p.runtime, { recursive: true, force: true });
+    await mkdir(p.runtime, { recursive: true });
+    await this.run(this.tarCommand(), ['-xf', p.runtimeArchive, '-C', p.runtime], { windowsHide: true, timeout: 180_000 });
+    await rm(p.runtimeArchive, { force: true });
+    if (!existsSync(p.runtimePython)) throw new Error('the Python download did not contain tools/python.exe');
   }
 
   tarCommand() {
@@ -156,9 +218,22 @@ export class LocalSearxng {
     if (this.isInstalled()) return;
     const p = this.paths;
     this.setStatus('installing', { step: 'Looking for Python 3.10 or newer…' });
-    const python = await this.findPython();
+    let python = await this.findPython();
+    if (!python && this.platform === 'win32') {
+      try {
+        await this.installPortablePython();
+      } catch (err) {
+        throw new Error(`SearXNG needs Python 3.10 or newer and Skadi could not download it (${err.message}). ` +
+          'Check the internet connection and press Reinstall, or install Python from python.org and turn SearXNG on again.');
+      }
+      python = await this.findPython();
+    }
     if (!python) {
-      throw new Error('SearXNG needs Python 3.10 or newer. Install it from python.org (tick "Add python.exe to PATH"), then turn SearXNG on again.');
+      throw new Error(this.platform === 'win32'
+        ? 'SearXNG needs Python 3.10 or newer, and the copy Skadi downloaded would not run. Install Python from python.org, then press Reinstall.'
+        : this.platform === 'darwin'
+          ? 'SearXNG needs Python 3.10 or newer. Install it with "brew install python" or from python.org, then turn SearXNG on again.'
+          : 'SearXNG needs Python 3.10 or newer with venv. Install it (Debian/Ubuntu: "sudo apt install python3 python3-venv"; Fedora: "sudo dnf install python3"), then turn SearXNG on again.');
     }
     await mkdir(p.dir, { recursive: true });
 

@@ -6,10 +6,14 @@
 <title>Skadi</title>
 <script>
   // Apply the saved theme before first paint so the page never flashes the default.
-  try { document.documentElement.dataset.theme = localStorage.getItem('skadi.theme') === 'oled' ? 'oled' : 'polar'; } catch {}
+  try {
+    document.documentElement.dataset.theme = localStorage.getItem('skadi.theme') === 'oled' ? 'oled' : 'polar';
+    if (localStorage.getItem('skadi.oledCare') === '1') document.documentElement.dataset.oledCare = '';
+  } catch {}
 </script>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="mission.css">
 </head>
 <body>
 
@@ -21,6 +25,9 @@
   <symbol id="i-plus" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.6v8.8M3.6 8h8.8"/></symbol>
   <symbol id="i-send" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3.2M3.9 7.3 8 3.2l4.1 4.1"/></symbol>
   <symbol id="i-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5 8 10l3.5-3.5"/></symbol>
+  <symbol id="i-scissors" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="4.3" cy="11.6" r="2"/><circle cx="11.7" cy="11.6" r="2"/><path d="M5.8 10.2 12.5 2.5M10.2 10.2 3.5 2.5"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M5.5 2.8H4a1.2 1.2 0 0 0-1.2 1.2v9.2A1.2 1.2 0 0 0 4 14.4h8a1.2 1.2 0 0 0 1.2-1.2V4A1.2 1.2 0 0 0 12 2.8h-1.5"/><rect x="5.5" y="1.6" width="5" height="2.6" rx=".8"/></symbol>
+  <symbol id="i-select-all" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2 1.6"><rect x="2.2" y="2.2" width="11.6" height="11.6" rx="1.5"/></symbol>
   <symbol id="i-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5h-6a2 2 0 0 0-2 2v6"/></symbol>
   <symbol id="i-download" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5v7.6M4.8 7.2 8 10.4l3.2-3.2M3 13h10"/></symbol>
   <symbol id="i-lock" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7"/></symbol>
@@ -120,6 +127,7 @@
   <aside class="rail left" id="chatRail">
     <section class="panel chats-panel">
       <button id="btnNewSession" class="new-chat-btn" type="button"><svg class="icon"><use href="#i-edit"/></svg><span>New chat</span></button>
+      <button id="btnMission" class="new-chat-btn mission-btn" type="button"><svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 13.5 10.5 5.5"/><path d="M5.5 2.5Q11.5 4.5 13.5 10.5"/></svg><span>Mission control</span></button>
       <button id="btnNewGroup" hidden aria-hidden="true" tabindex="-1"></button>
       <div class="chat-search">
         <input type="text" id="chatSearch" aria-label="Search chats" placeholder="Search chats…" spellcheck="false" autocomplete="off">
@@ -151,6 +159,7 @@
   <section class="centre" id="centre">
 
   <!-- -------------------------------------------------------------- chat -->
+  <div class="mission-view" id="missionView" hidden></div>
   <div class="chat view active" id="chatView">
     <!-- Everything this chat changed on disk, above everything it said. Hidden
          until the chat has edited something. -->
@@ -202,15 +211,26 @@
       </div>
     </section>
 
-    <div class="approval" id="approval" hidden>
-      <svg class="icon warn-icon"><use href="#i-warn"/></svg>
-      <div class="approval-body">
-        <strong id="approvalTitle"></strong>
-        <pre id="approvalArgs"></pre>
+    <div class="approval" id="approval" role="alertdialog" aria-labelledby="approvalTitle" hidden>
+      <div class="approval-head">
+        <span class="approval-badge" aria-hidden="true"><svg class="icon"><use href="#i-warn"/></svg></span>
+        <div class="approval-heading">
+          <strong id="approvalTitle"></strong>
+          <span class="approval-sub">Skadi is asking before it continues</span>
+        </div>
       </div>
-      <div class="approval-actions">
-        <button id="btnDeny" class="btn">Deny</button>
-        <button id="btnAllow" class="btn primary">Allow</button>
+      <p class="approval-summary" id="approvalSummary" hidden></p>
+      <code class="approval-preview" id="approvalPreview" hidden></code>
+      <p class="approval-reason" id="approvalReason" hidden></p>
+      <div class="approval-foot">
+        <details class="approval-details">
+          <summary>Technical details</summary>
+          <pre id="approvalArgs"></pre>
+        </details>
+        <div class="approval-actions">
+          <button id="btnDeny" class="btn">Deny</button>
+          <button id="btnAllow" class="btn primary">Allow</button>
+        </div>
       </div>
     </div>
 
@@ -813,5 +833,6 @@
 </dialog>
 
 <script type="module" src="app.js"></script>
+<script type="module" src="mission.js"></script>
 </body>
 </html>

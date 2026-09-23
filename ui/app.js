@@ -864,7 +864,7 @@ function addTool(name, args, result) {
 
   const out = el('pre', 'out');
   out.hidden = true;
-  if (result) out.textContent = redactCredentials(String(result.content ?? '').slice(0, 8000));
+  if (result) fillToolOutput(out, result.content, args?.path);
 
   head.onclick = () => {
     setCardOpen(card, out.hidden);
@@ -1129,6 +1129,30 @@ function renderSourceLines(container, text, lang) {
   return box;
 }
 
+/**
+ * A tool's output in its card. An edit's result carries a unified diff in a
+ * ```diff fence: that part is drawn as a real diff, with +/- rows tinted and
+ * the code coloured for the file's language. Anything else stays plain text.
+ */
+function fillToolOutput(out, content, path) {
+  const text = redactCredentials(String(content ?? '').slice(0, 8000));
+  const fence = /```diff\n([\s\S]*?)(?:\n```|$)/.exec(text);
+  if (!fence) {
+    out.classList.remove('has-diff');
+    out.textContent = text;
+    return;
+  }
+  out.classList.add('has-diff');
+  out.replaceChildren();
+  const before = text.slice(0, fence.index).trim();
+  const after = text.slice(fence.index + fence[0].length).trim();
+  if (before) out.append(el('div', 'out-note', before));
+  const diff = el('div', 'out-diff');
+  renderDiffLines(diff, fence[1].replace(/\n$/, ''), languageFor(path || ''));
+  out.append(diff);
+  if (after) out.append(el('div', 'out-note', after));
+}
+
 function extractDiff(content) {
   const m = /```diff\n([\s\S]*?)(?:\n```|$)/.exec(String(content ?? ''));
   return m ? m[1].replace(/\n$/, '') : null;
@@ -1184,10 +1208,10 @@ let fileModalPath = null;
 // One delegated listener covers all of them, including ones drawn later.
 // ============================================================================
 
-const ZOOMABLE = 'img.msg-thumb, img.chip-thumb, img.shot-thumb, figure.shot img';
+const ZOOMABLE = 'img.msg-thumb, img.chip-thumb, img.shot-thumb, figure.shot img, figure.pixel-shot img';
 let lightboxEl = null;
 
-function openLightbox(src, alt = '') {
+function openLightbox(src, alt = '', opts = {}) {
   closeLightbox();
   const veil = el('div', 'lightbox');
   veil.setAttribute('role', 'dialog');
@@ -1196,6 +1220,18 @@ function openLightbox(src, alt = '') {
   const img = el('img', 'lightbox-img');
   img.src = src;
   img.alt = alt;
+  // Pixel art is tiny: blow it up by a whole number, never smoothed, so
+  // every pixel stays a crisp square.
+  if (opts.pixel) {
+    veil.classList.add('pixel');
+    img.onload = () => {
+      const w = img.naturalWidth, h = img.naturalHeight;
+      const room = Math.min((window.innerWidth - 64) / w, (window.innerHeight - 96) / h);
+      const scale = Math.max(1, Math.floor(room));
+      img.width = w * scale;
+      img.height = h * scale;
+    };
+  }
   const close = el('button', 'icon-btn lightbox-close');
   close.type = 'button';
   close.title = 'Close';
@@ -1217,7 +1253,7 @@ function closeLightbox() {
 
 document.addEventListener('click', (e) => {
   const img = e.target instanceof Element ? e.target.closest(ZOOMABLE) : null;
-  if (img?.src) openLightbox(img.src, img.alt);
+  if (img?.src) openLightbox(img.src, img.alt, { pixel: !!img.closest('figure.pixel-shot') });
 });
 // Capture phase, so Escape closes the preview and not the dialog behind it.
 document.addEventListener('keydown', (e) => {
@@ -4545,6 +4581,120 @@ function menuSeparator() {
   return el('div', 'ctx-sep');
 }
 
+// ------------------------------------------------------- edit context menu --
+//
+// The desktop shell turns WebView2's own right-click menu off (it offers
+// browser things like Back and Inspect). This puts back the part people
+// expect: Cut, Copy, Paste and Select all on text fields, Copy on selected
+// chat text, Copy image on pictures. Menus that belong to a row (chats,
+// groups) call preventDefault first and keep their own.
+
+function editableTarget(node) {
+  const t = node instanceof Element ? node.closest('input, textarea, [contenteditable=""], [contenteditable="true"]') : null;
+  if (!t || t.disabled || t.readOnly) return null;
+  if (t instanceof HTMLInputElement && !/^(text|search|url|email|tel|password|number|)$/.test(t.type)) return null;
+  return t;
+}
+
+function insertIntoField(field, text) {
+  field.focus();
+  // execCommand keeps the field's own undo history; fall back to a splice.
+  if (!document.execCommand('insertText', false, text) && 'value' in field) {
+    const a = field.selectionStart ?? field.value.length;
+    const b = field.selectionEnd ?? a;
+    field.value = field.value.slice(0, a) + text + field.value.slice(b);
+    field.selectionStart = field.selectionEnd = a + text.length;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+async function toPngBlob(img) {
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.drawImage(img, 0, 0);
+  return new Promise((resolve, reject) => c.toBlob((b) => (b ? resolve(b) : reject(new Error('no image'))), 'image/png'));
+}
+
+document.addEventListener('contextmenu', (e) => {
+  if (e.defaultPrevented) return;
+  e.preventDefault();
+  const field = editableTarget(e.target);
+  const secret = field instanceof HTMLInputElement && field.type === 'password';
+  const fieldSel = field && 'value' in field
+    ? field.value.slice(field.selectionStart ?? 0, field.selectionEnd ?? 0)
+    : '';
+  const pageSel = String(window.getSelection?.() || '');
+  const selected = field ? (fieldSel || pageSel) : pageSel;
+  const image = e.target instanceof Element ? e.target.closest('img') : null;
+  if (!field && !selected && !image?.src) return;
+
+  const range = field && 'setSelectionRange' in field ? [field.selectionStart, field.selectionEnd] : null;
+  const refocus = () => {
+    if (!field) return;
+    field.focus();
+    if (range) field.setSelectionRange(range[0], range[1]);
+  };
+
+  const menu = $('chatMenu');
+  menu.replaceChildren();
+  if (field) {
+    const cut = menuButton('Cut', 'scissors', async () => {
+      refocus();
+      await navigator.clipboard.writeText(selected).catch(() => {});
+      document.execCommand('delete');
+    });
+    cut.disabled = !selected || secret;
+    menu.append(cut);
+  }
+  if (field || selected) {
+    const copy = menuButton('Copy', 'copy', async () => {
+      await navigator.clipboard.writeText(selected).catch(() => toast('Could not copy'));
+      refocus();
+    });
+    copy.disabled = !selected || secret;
+    menu.append(copy);
+  }
+  if (field) {
+    menu.append(menuButton('Paste', 'paste', async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        refocus();
+        if (text) insertIntoField(field, text);
+      } catch {
+        refocus();
+        toast('Paste with Ctrl+V');
+      }
+    }));
+  }
+  if (image?.src) {
+    if (menu.children.length) menu.append(menuSeparator());
+    menu.append(menuButton('Copy image', 'copy', async () => {
+      try {
+        const blob = await (await fetch(image.src)).blob();
+        const png = blob.type === 'image/png' ? blob : await toPngBlob(image);
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+        toast('Image copied');
+      } catch {
+        toast('Could not copy the image');
+      }
+    }));
+  }
+  if (field) {
+    menu.append(menuSeparator());
+    menu.append(menuButton('Select all', 'select-all', () => {
+      field.focus();
+      if ('select' in field) field.select();
+      else document.execCommand('selectAll');
+    }));
+  }
+  // Keep the field's focus and selection while the menu is used.
+  for (const b of menu.querySelectorAll('button')) b.addEventListener('mousedown', (ev) => ev.preventDefault());
+  placeMenu(menu, null, { x: e.clientX, y: e.clientY });
+});
+
 function openChatMenu(sessionId, anchor, point) {
   const s = sessionById(sessionId);
   if (!s) return;
@@ -4835,6 +4985,7 @@ function contentToThumbs(content) {
 }
 
 async function openSession(id) {
+  window.skadiMission?.hide();
   const session = await api(`session?id=${encodeURIComponent(id)}`);
   // Nothing below can run without a transcript, and everything below has
   // already changed the window when it finds that out. A chat deleted from
@@ -4904,7 +5055,7 @@ async function openSession(id) {
       if (card) {
         card.classList.remove('pending');
         card.classList.add(ok ? 'ok' : 'err');
-        card.querySelector('.out').textContent = String(m.content ?? '').slice(0, 8000);
+        fillToolOutput(card.querySelector('.out'), m.content, card.dataset.path);
         updateFileChip(card, { content: m.content });
         if (ok && /^pixel_(new|draw|view|import)$/.test(card.dataset.tool || '')) {
           const named = card._args?.name || /"([A-Za-z0-9_-]{1,40})"/.exec(String(m.content ?? ''))?.[1];
@@ -5120,6 +5271,18 @@ function shortTitle(sessionId) {
  * per chat: a background turn asking for permission must not hijack the card
  * of the chat you are reading, and it is still there when you switch to it.
  */
+const APPROVAL_TITLES = {
+  run_command: 'Run a command?',
+  write_file: 'Write a file?',
+  edit_file: 'Edit a file?',
+  delete_file: 'Delete a file?',
+  remember: 'Save a memory?',
+  forget: 'Forget a memory?',
+  save_skill: 'Save a skill?',
+  pixel_export: 'Export an image?',
+  task_stop: 'Stop a background task?',
+};
+
 function renderApproval() {
   const pending = state.approvals.get(state.sessionId);
   const card = $('approval');
@@ -5127,7 +5290,18 @@ function renderApproval() {
   if (!pending) return;
   card.dataset.callId = pending.id;
   card.dataset.sessionId = state.sessionId;
-  $('approvalTitle').textContent = `Allow ${pending.name}?`;
+  const args = pending.args || {};
+  $('approvalTitle').textContent = APPROVAL_TITLES[pending.name] || `Allow ${pending.name}?`;
+  $('approvalSummary').textContent = pending.summary || '';
+  $('approvalSummary').hidden = !pending.summary;
+  // The exact thing being approved, readable at a glance: the command itself,
+  // or the file it touches.
+  const preview = pending.name === 'run_command' ? args.command : args.path;
+  $('approvalPreview').textContent = preview ? String(preview) : '';
+  $('approvalPreview').hidden = !preview;
+  $('approval').querySelector('.approval-details').open = false;
+  $('approvalReason').textContent = pending.safeguard ? `⚠ Held by ${pending.safeguard}` : '';
+  $('approvalReason').hidden = !pending.safeguard;
   $('approvalArgs').textContent = JSON.stringify(pending.args, null, 2);
   if (isPendingView(state.sessionId)) setActivity(`Waiting for approval: ${pending.name}…`);
 }
@@ -5258,7 +5432,7 @@ function applyAgentEvent(type, d, startedAt = null) {
     card.classList.remove('pending');
     card.classList.add(d.ok ? 'ok' : 'err');
     card.querySelector('.ms').textContent = d.ms != null ? `${d.ms}ms` : '';
-    card.querySelector('.out').textContent = String(d.content ?? '').slice(0, 8000);
+    fillToolOutput(card.querySelector('.out'), d.content, card.dataset.path);
     // The server snapshot for this edit exists from here on; track it so the
     // Undo button appears without reopening the session (openSession and the
     // undo response reconcile with the server as source of truth).
@@ -7570,6 +7744,7 @@ $('mmSort').addEventListener('change', runSearch);
 refreshQuickModels();
 
 $('btnNewSession').onclick = () => {
+  window.skadiMission?.hide();
   // leaveSession does the four things every exit owes the chat being left:
   // park its draft, put the new one's up, re-read whether *it* is mid-turn
   // (the previous chat's "Stop generating" state is not this one's), and hand
@@ -7846,6 +8021,52 @@ function applyTheme() {
   const theme = (state.settings && state.settings.theme) === 'oled' ? 'oled' : 'polar';
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem('skadi.theme', theme); } catch {} // remembered by the <head> script for the next open
+  applyOledCare();
+}
+
+// ---------------------------------------------------------- OLED care ------
+//
+// OLED pixels age with use, so anything lit in the same place for hours (a
+// logo, labels, a row of icons) can leave a ghost. OLED care keeps the top
+// bar to the controls people actually click, dims them, nudges it by a pixel
+// every couple of minutes, and dims the whole window after idle time.
+
+const OLED_SHIFT_MS = 120_000;
+const OLED_IDLE_MS = 180_000;
+const OLED_SHIFTS = [[0, 0], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+let oledShiftTimer = null;
+let oledIdleTimer = null;
+let oledShiftStep = 0;
+
+function oledWake() {
+  const root = document.documentElement;
+  if (!('oledCare' in root.dataset)) return;
+  root.classList.remove('oled-idle');
+  clearTimeout(oledIdleTimer);
+  oledIdleTimer = setTimeout(() => root.classList.add('oled-idle'), OLED_IDLE_MS);
+}
+
+function applyOledCare() {
+  const root = document.documentElement;
+  const on = !!state.settings?.oledCare;
+  if (on) root.dataset.oledCare = '';
+  else delete root.dataset.oledCare;
+  try { localStorage.setItem('skadi.oledCare', on ? '1' : '0'); } catch {}
+  clearInterval(oledShiftTimer);
+  clearTimeout(oledIdleTimer);
+  root.classList.remove('oled-idle');
+  root.style.removeProperty('--oled-dx');
+  root.style.removeProperty('--oled-dy');
+  if (!on) return;
+  oledShiftTimer = setInterval(() => {
+    const [dx, dy] = OLED_SHIFTS[++oledShiftStep % OLED_SHIFTS.length];
+    root.style.setProperty('--oled-dx', `${dx}px`);
+    root.style.setProperty('--oled-dy', `${dy}px`);
+  }, OLED_SHIFT_MS);
+  oledWake();
+}
+for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'focusin']) {
+  document.addEventListener(type, oledWake, { passive: true, capture: true });
 }
 
 let settingsRows = [];
@@ -8525,8 +8746,24 @@ function renderSettingsPane() {
     onSync: () => applyTheme(),
     save: async (v) => {
       state.settings = await api('settings', settingPatch('theme', v ? 'oled' : 'polar'));
+      // Turning OLED on brings burn-in care with it; it can be switched off
+      // on its own below. Turning OLED off leaves that choice alone.
+      if (v && !state.settings.oledCare) state.settings = await api('settings', settingPatch('oledCare', true));
       applyTheme();
-      for (const row of settingsRows) if (row.spec.key === 'theme') updateEntry(row);
+      for (const row of settingsRows) if (row.spec.key === 'theme' || row.spec.key === 'oledCare') updateEntry(row);
+    },
+  });
+  addRow(appearance, {
+    key: 'oledCare',
+    type: 'toggle',
+    icon: 'eye',
+    label: 'OLED burn-in care',
+    desc: 'Keeps only the controls you use in the top bar and dims them, shifts it by a pixel every few minutes, and dims the window after 3 idle minutes. Commands stay on Ctrl+K.',
+    controlValue: () => !!state.settings.oledCare,
+    onSync: () => applyOledCare(),
+    save: async (v) => {
+      state.settings = await api('settings', settingPatch('oledCare', !!v));
+      applyOledCare();
     },
   });
 
@@ -8932,7 +9169,7 @@ function renderSettingsPane() {
     type: 'toggle',
     icon: 'globe',
     label: 'Private search with SearXNG',
-    desc: 'Runs SearXNG on this computer, no Docker needed. The first time, Skadi installs it by itself (needs Python 3.10 or newer, takes a few minutes). Until it is ready, searches use DuckDuckGo.',
+    desc: 'Runs SearXNG on this computer, no Docker needed. The first time, Skadi installs it by itself (a few minutes; if Python 3.10+ is missing, Skadi downloads its own private copy). Until it is ready, searches use DuckDuckGo.',
     save: async (v) => {
       state.settings = await api('settings', settingPatch('searxngAutoStart', v));
       state.searchStatus = { ...(state.searchStatus || {}), state: v ? 'starting' : 'off' };
@@ -9555,3 +9792,6 @@ boot().catch((err) => {
     `<pre style="color:#ff6f7d;padding:18px;font:13px ui-monospace,monospace">Skadi failed to start: ${escapeHtml(err.message)}</pre>`,
   );
 });
+
+// Mission Control (mission.js) borrows these rather than duplicating them.
+window.skadiBridge = { openSession, loadModelList, providers: () => state.providers, toast };

@@ -685,29 +685,76 @@ details.think .think-body {
 /* ---------------------------------------------------------------- approval */
 
 .approval {
-  margin: 0 28px 10px;
+  width: min(900px, calc(100% - 40px));
+  margin: 6px auto 4px;
   border: 1px solid var(--warn-edge);
-  border-radius: var(--radius);
-  background: var(--warn-soft);
-  padding: 11px 13px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--warn-soft), var(--raised) 70%);
+  padding: 14px 16px 12px;
   display: flex;
-  gap: 11px;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 8px;
   box-shadow: var(--shadow);
 }
-.warn-icon { color: var(--warn); width: 16px; height: 16px; margin-top: 2px; }
-.approval-body { flex: 1; min-width: 0; }
-.approval-body strong { font-size: 14px; font-weight: 600; }
-.approval pre {
-  margin: 6px 0 0;
-  font: 400 13px/1.55 var(--mono);
+.approval[hidden] { display: none; }
+.approval-head { display: flex; align-items: center; gap: 11px; }
+.approval-badge {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  box-shadow: inset 0 0 0 1px var(--warn-edge);
+  color: var(--warn);
+}
+.approval-badge .icon { width: 16px; height: 16px; }
+.approval-heading { display: flex; flex-direction: column; min-width: 0; }
+.approval-heading strong { font-size: 14.5px; font-weight: 600; color: var(--text); }
+.approval-sub { font-size: 12px; color: var(--text-faint); }
+.approval-summary { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text); }
+.approval-preview {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg, rgba(0, 0, 0, .25));
+  font: 400 13px/1.5 var(--mono);
   color: var(--text-dim);
-  max-height: 150px;
+  max-height: 96px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
-.approval-actions { display: flex; gap: 7px; flex: none; }
+.approval-preview[hidden], .approval-summary[hidden], .approval-reason[hidden] { display: none; }
+.approval-reason {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--warn);
+}
+.approval-foot { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.approval-details { flex: 1 1 200px; min-width: 0; padding-top: 7px; font-size: 12.5px; }
+.approval-details > summary { cursor: pointer; color: var(--text-faint); width: max-content; }
+.approval-details > summary:hover { color: var(--text-dim); }
+.approval pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg, rgba(0, 0, 0, .25));
+  font: 400 12.5px/1.5 var(--mono);
+  color: var(--text-dim);
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.approval-actions { display: flex; gap: 8px; flex: none; margin-left: auto; }
+.approval-actions .btn { min-width: 76px; justify-content: center; }
 
 /* ---------------------------------------------------------------- composer */
 
@@ -985,7 +1032,6 @@ table.kv tr.measured.bad td { color: var(--bad); }
 @media (max-width: 1240px) {
   .layout { grid-template-columns: minmax(160px, var(--left-w, 200px)) minmax(0, 1fr) minmax(240px, var(--right-w, 300px)); }
   .messages, .composer { padding-left: 18px; padding-right: 18px; }
-  .approval { margin-left: 18px; margin-right: 18px; }
 }
 @media (max-width: 1000px) {
   .layout { grid-template-columns: minmax(160px, var(--left-w, 220px)) minmax(0, 1fr); }
@@ -2043,16 +2089,18 @@ input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; marg
   --motion-ui: 180ms;
 }
 
+/* OLED: true neutral greys. A blue tint here shows as a coloured frame
+   around every panel on a black screen. */
 html[data-theme="oled"] {
   --bg: #000000;
-  --surface: #080a0d;
-  --raised: #0d1014;
-  --raised-2: #14181d;
-  --line: #242a31;
-  --line-soft: #171c21;
-  --text: #f1f4f6;
-  --text-dim: #a3adb7;
-  --text-faint: #77818b;
+  --surface: #000000;
+  --raised: #0e0e0e;
+  --raised-2: #161616;
+  --line: #262626;
+  --line-soft: #1a1a1a;
+  --text: #f2f2f2;
+  --text-dim: #a8a8a8;
+  --text-faint: #7a7a7a;
   --accent: #57cdb2;
   --accent-deep: #31977f;
   --accent-dim: #173f37;
@@ -3173,6 +3221,9 @@ body.generating .chat-row.active .chat-sub { color: var(--accent); animation: pu
 
 /* Local-model controls remain a first-class workspace surface. */
 .local-ai-pane { padding: 10px; overflow-y: auto; }
+/* Workspace panes only scroll vertically; floating bits like a slider's value
+   bubble must not widen them into a sideways scroll. */
+.tool-dock .tool-pane { overflow-x: hidden; }
 .local-ai-pane > .tool-pane-title { padding: 4px 4px 0; }
 .local-ai-intro { padding: 0 4px; }
 .local-ai-pane .panel { margin-bottom: 8px; }
@@ -4165,6 +4216,12 @@ label .help:hover { color: var(--text); border-color: var(--text-faint); }
   box-shadow: var(--shadow);
   background: #060a0f;
 }
+.lightbox.pixel .lightbox-img {
+  max-width: none;
+  max-height: none;
+  image-rendering: pixelated;
+  background: repeating-conic-gradient(#1a2028 0% 25%, #11161c 0% 50%) 50% / 16px 16px;
+}
 .lightbox-close {
   position: absolute;
   top: 14px;
@@ -4697,7 +4754,10 @@ textarea.ledger-note { width: 100%; min-height: 76px; padding: 9px 11px; resize:
   font: 700 11.5px/1 var(--sans); font-variant-numeric: tabular-nums;
 }
 .tool-tab-count.warn { color: #1d1300; background: var(--warn); }
-@media (min-width: 1500px) {
+/* One row of six only when the dock itself is wide enough for the labels;
+   the window can be wide while the dock is dragged narrow. */
+.tool-dock { container-type: inline-size; }
+@container (min-width: 480px) {
   .tool-tabs { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .tool-tabs button { flex-direction: column; gap: 4px; min-height: 52px; }
   .tool-tab-count { position: absolute; top: 4px; right: 6px; margin: 0; }
@@ -4772,7 +4832,7 @@ figure.pixel-shot {
   background: repeating-conic-gradient(var(--raised) 0% 25%, var(--raised-2) 0% 50%) 50% / 16px 16px;
   border: 1px solid var(--line); border-radius: var(--radius);
 }
-figure.pixel-shot img { display: block; max-width: 100%; height: auto; image-rendering: pixelated; }
+figure.pixel-shot img { cursor: zoom-in; display: block; max-width: 100%; height: auto; image-rendering: pixelated; }
 figure.pixel-shot figcaption { margin-top: 8px; color: var(--text-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
 
 /* ==========================================================================
@@ -4836,4 +4896,114 @@ figure.pixel-shot figcaption { margin-top: 8px; color: var(--text-dim); font-siz
 }
 @media (prefers-reduced-motion: reduce) {
   .status-badge::before { animation: none !important; }
+}
+
+/* ==========================================================================
+   Composer bar stays on one row as the pane narrows: labels shrink and
+   ellipsize instead of the two groups breaking onto staggered lines. Only a
+   very narrow pane stacks it, and then each group fills its own row.
+   ========================================================================== */
+.composer-bar { flex-wrap: nowrap; }
+.composer-bar .bar-group:first-child { flex: 0 1 auto; }
+.composer-bar .bar-group:last-child { flex: 0 1 auto; justify-content: flex-end; }
+.composer-bar .mode-select { min-width: 72px; }
+.composer-bar .effort-select:not(.mode-select) { min-width: 64px; }
+@container (max-width: 560px) {
+  .model-chip .mc-provider { display: none; }
+  .composer-bar .mode-select { max-width: 120px; }
+}
+@container (max-width: 420px) {
+  .composer-bar { flex-wrap: wrap; }
+  .composer-bar .bar-group:first-child,
+  .composer-bar .bar-group:last-child { flex: 1 1 100%; }
+  .composer-bar .bar-group:last-child { justify-content: space-between; }
+  .composer-bar .mode-select { flex: 1 1 auto; max-width: none; }
+  .model-picker { flex: 1 1 auto; }
+}
+@media (max-width: 640px) {
+  .approval { width: calc(100% - 20px); padding: 12px; }
+  .approval-actions { flex: 1 1 100%; }
+  .approval-actions .btn { flex: 1; }
+}
+
+.ctx-item:disabled { opacity: .4; cursor: default; pointer-events: none; }
+
+/* ==========================================================================
+   OLED burn-in care. Only what gets clicked stays in the top bar; the rest
+   (brand text, project/session path, speed metrics, Changes, Benchmarks, the
+   Commands button) goes -- it is all in the chat, the composer, or Ctrl+K.
+   What remains is dimmed until hovered and drifts by a pixel over time.
+   ========================================================================== */
+html[data-oled-care] .topbar {
+  background: #000;
+  border-bottom-color: transparent;
+  box-shadow: none;
+}
+html[data-oled-care] .topbar > * {
+  transform: translate(var(--oled-dx, 0), var(--oled-dy, 0));
+  transition: transform 2s ease, opacity .2s ease;
+}
+html[data-oled-care] .brand-copy,
+html[data-oled-care] .topbar-context,
+html[data-oled-care] .metrics,
+html[data-oled-care] #btnChanges,
+html[data-oled-care] #btnBenchmarks,
+html[data-oled-care] #btnPalette,
+html[data-oled-care] #btnBrowser > span:not(.dot) { display: none !important; }
+html[data-oled-care] .brand-mark { opacity: .35; filter: grayscale(1); }
+/* The server pill shrinks to its dot; the word shows on hover. */
+html[data-oled-care] .status-pill { padding: 0 6px; background: transparent; border-color: transparent; }
+html[data-oled-care] .status-pill #serverStateText { display: none; }
+html[data-oled-care] .status-pill:hover #serverStateText { display: inline; }
+html[data-oled-care] .topbar .icon-btn,
+html[data-oled-care] .topbar .top-tool-btn,
+html[data-oled-care] .topbar .status-pill,
+html[data-oled-care] .window-controls,
+html[data-oled-care] .topbar .deploy-menu { opacity: .45; }
+html[data-oled-care] .topbar .icon-btn:hover,
+html[data-oled-care] .topbar .icon-btn[aria-pressed="true"],
+html[data-oled-care] .topbar .top-tool-btn:hover,
+html[data-oled-care] .topbar .top-tool-btn[aria-pressed="true"],
+html[data-oled-care] .topbar .status-pill:hover,
+html[data-oled-care] .window-controls:hover,
+html[data-oled-care] .topbar .deploy-menu:hover { opacity: 1; }
+html[data-oled-care] .topbar .top-tool-btn { background: transparent; border-color: transparent; }
+/* Idle: the whole window dims until the mouse or keyboard is used. */
+html[data-oled-care] body { transition: filter 1.2s ease; }
+html[data-oled-care].oled-idle body { filter: brightness(.35); }
+
+/* OLED top bar: plain black, no translucent tint or shadow. */
+html[data-theme="oled"] .topbar { background: #000; border-bottom-color: var(--line-soft); box-shadow: none; }
+
+/* Browser button: with its label showing, the running dot sits inline after
+   the word (centred), not pinned to the corner like a stray full stop. The
+   corner badge is kept for the icon-only button. */
+#btnBrowser.top-tool-btn .dot { position: static; width: 6px; height: 6px; flex: none; }
+html[data-oled-care] #btnBrowser.top-tool-btn .dot { position: absolute; right: 5px; bottom: 5px; }
+@media (max-width: 940px) {
+  #btnBrowser.top-tool-btn .dot { position: absolute; right: 5px; bottom: 5px; }
+}
+
+/* Fold headers: the title sits on the header's centre line (the generic
+   ".tool-pane h2" bottom margin pushed it up), and the chevron is big and
+   bright enough to read as a control. */
+.tool-pane .panel-head h2 { margin: 0; }
+.fold-chevron { width: 16px; height: 16px; margin-right: 0; color: var(--text-dim); stroke-width: 2; }
+.panel[data-fold] > .panel-head:hover .fold-chevron { color: var(--text); }
+
+/* An edit's diff inside its tool card: same rows as the review view. */
+.tool pre.out.has-diff { white-space: normal; }
+.tool pre.out.has-diff .out-note { white-space: pre-wrap; color: var(--text-faint); margin: 0 0 6px; }
+.tool pre.out.has-diff .out-note:last-child { margin: 6px 0 0; }
+.tool pre.out.has-diff .df-line { padding: 0 6px; }
+
+/* The permission picker keeps its label whole; the model chip is what gives
+   way (it ellipsizes its model name) so the two never paint over each other. */
+@container (min-width: 421px) {
+  .composer-bar { gap: 8px; }
+  .composer-bar .bar-group:first-child { flex: 0 0 auto; }
+  .composer-bar .mode-select { flex: none; min-width: 0; }
+  .composer-bar .bar-group:last-child { flex: 1 1 0; min-width: 0; }
+  .composer-bar .model-picker { min-width: 0; flex: 0 1 auto; }
+  .composer-bar .model-chip { max-width: 100%; overflow: hidden; }
 }
