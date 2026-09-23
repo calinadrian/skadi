@@ -249,7 +249,7 @@ export function planToolResult(raw) {
   const current = plan.items.findIndex((item) => item.status === 'working');
   const open = plan.items.filter((item) => !['done', 'skipped'].includes(item.status)).length;
   const next = current >= 0
-    ? `Current step: ${current + 1}. When it is finished, call update_plan with {"action":"status","step":${current + 1},"status":"done"}.`
+    ? `Current step: ${current + 1}. When it is finished, mark it done in the same response as your next tool call: update_plan {"action":"status","step":${current + 1},"status":"done"}.`
     : open ? 'No step is marked "now". Mark the step you start with status "working".' : 'Every step is finished or skipped.';
   return `Plan saved.\n${planText(plan)}\n${next}`;
 }
@@ -262,6 +262,6 @@ export function planPrompt(raw) {
     '## Plan',
     planText(plan),
     current >= 0 ? `You are on step ${current + 1}.` : '',
-    `When a step is finished, call update_plan {"action":"status","step":N,"status":"done"}; the next step starts automatically.${plan.userEdited ? ' The user has edited this plan: follow it as written, and never do skipped work.' : ' Never do skipped work.'}`,
+    `When a step is finished, mark it done alongside your next tool call (never as a response of its own): update_plan {"action":"status","step":N,"status":"done"}; the next step starts automatically.${plan.userEdited ? ' The user has edited this plan: follow it as written, and never do skipped work.' : ' Never do skipped work.'}`,
   ].filter(Boolean).join('\n');
 }

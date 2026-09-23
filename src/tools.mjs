@@ -976,6 +976,7 @@ export function buildTools(ctx) {
         description:
           'A short checklist for bigger, multi-step tasks (skip it for small ones). Start with action "set" and 3-6 short steps; the first step becomes current. ' +
           'When a step is finished, use action "status" with its step number and status "done"; the next step starts automatically. ' +
+          'Never spend a response on the plan alone: call update_plan in the same response as your next real tool call. ' +
           'The user can edit the plan at any time: follow it as written and never do skipped steps.',
         parameters: {
           type: 'object',

@@ -70,3 +70,13 @@ test('a reported fix waits for the user; a failed one stays approved with the re
   assert.equal(fix.attempts.at(-1).verdict, 'accepted');
   assert.equal(stuck.attempts.at(-1).verdict, 'rejected');
 });
+
+test('each room drops the tools its job never uses', async () => {
+  const { roomToolsOff } = await import('../src/mission.mjs');
+  for (const room of ['development', 'quality', 'review', 'docs']) {
+    const off = roomToolsOff(room);
+    for (const name of ['update_plan', 'remember', 'pixel_draw', 'delegate_task', 'web_search']) assert.ok(off.includes(name), `${room} keeps ${name}`);
+    assert.ok(!off.includes('browser_open') && !off.includes('load_skill') && !off.includes('run_command'));
+  }
+  assert.ok(!roomToolsOff('research').includes('web_search'), 'research must keep web search');
+});

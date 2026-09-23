@@ -55,7 +55,7 @@ import {
 } from './providers.mjs';
 import { progressReviewInput, progressReviewPrompt, parseProgressReview } from './progress-review.mjs';
 import { delegationPrompt, parseDelegation } from './delegation.mjs';
-import { MissionStore, ROOMS, roomBrief, parseTickets, normalizeTickets, messageText, unverifiedFix } from './mission.mjs';
+import { MissionStore, ROOMS, roomBrief, roomToolsOff, parseTickets, normalizeTickets, messageText, unverifiedFix } from './mission.mjs';
 import { loadProjects, activeProject, addProject, removeProject, selectProject, projectSummary, projectsWithStatus } from './projects.mjs';
 import { storeAttachment, attachmentsToBlocks, describeAttachments } from './attachments.mjs';
 import { AgentBrowser, browserTools, SHOTS_DIR, VIEWPORT, profileDirFor } from './browser.mjs';
@@ -1539,7 +1539,8 @@ export class Skadi {
     browser.lastUsed = Date.now();
     await browser.launch();
     // Anyone watching the pane wants frames the moment the agent navigates.
-    if (this.browserClients.get(key)?.size) await browser.startScreencast();
+    // The mirror is for the user; it must never fail the agent's tool call.
+    if (this.browserClients.get(key)?.size) await browser.startScreencast().catch((err) => console.error('[browser] screencast:', err.message));
     return browser;
   }
 
@@ -1919,7 +1920,7 @@ export class Skadi {
     }
   }
 
-  async makeAgent(provider, model, { webSearch = true, subagents = true, pixel = false, workspace = null, readOnly = false, extraTools = null } = {}) {
+  async makeAgent(provider, model, { webSearch = true, subagents = true, pixel = false, workspace = null, readOnly = false, extraTools = null, toolsOff = null } = {}) {
     const cwd = workspace || this.workspace;
     const ctx = {
       workspace: cwd,
@@ -1995,6 +1996,7 @@ export class Skadi {
     // Report-only runs (Mission Control research, bug hunts, reviews) keep
     // their shell and browser but cannot write files.
     if (readOnly) for (const name of ['write_file', 'edit_file', 'delete_file']) delete tools[name];
+    for (const name of toolsOff || []) delete tools[name];
     Object.assign(tools, extraTools || {});
     const agent = new Agent({
       provider,
@@ -2478,7 +2480,7 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
           model,
           browser: true,
           permissionMode: this.settings.permissionMode || 'default',
-          planning: this.settings.planning !== false,
+          planning: this.settings.planning !== false && !(opts.mission || session.mission),
           subagents: session.subagents !== false,
         }),
       });
@@ -2585,6 +2587,7 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
       workspace: workProject?.path,
       readOnly: opts.readOnly === true || missionKit?.readOnly === true,
       extraTools: opts.extraTools ?? missionKit?.tools,
+      toolsOff: session.mission ? roomToolsOff(session.mission.room) : null,
     });
     // Per-turn tool context: background tasks tag this session, and file
     // edits push undo snapshots here (capped; before-images clipped). They

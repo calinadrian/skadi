@@ -145,7 +145,14 @@ export class AgentBrowser extends EventEmitter {
     };
   }
 
-  async launch() {
+  launch() {
+    if (this.running) return Promise.resolve();
+    // Concurrent callers share one launch: two would each attach a socket.
+    this.launching ??= this._launch().finally(() => { this.launching = null; });
+    return this.launching;
+  }
+
+  async _launch() {
     if (this.running) return;
 
     if (!this.proc) {
@@ -315,19 +322,33 @@ export class AgentBrowser extends EventEmitter {
 
   // --------------------------------------------------------------- screencast
 
-  async startScreencast() {
+  startScreencast() {
+    // The pane and an agent's navigation can both ask at once. Both used to
+    // pass the casting check before either finished, and Chrome refused the
+    // second with "Screencast is already active" -- which failed the agent's
+    // browser_open. One start in flight, shared by every caller.
+    this.castStart ??= this._startScreencast().finally(() => { this.castStart = null; });
+    return this.castStart;
+  }
+
+  async _startScreencast() {
     await this.launch();
     if (this.casting) return;
     // Frame aspect follows the device, so the UI's click mapping (displayed
     // rect scaled into viewport space) stays exact in every mode.
     const dev = DEVICES[this.device] || DEVICES.desktop;
-    await this.send('Page.startScreencast', {
-      format: 'jpeg',
-      quality: 70,
-      maxWidth: dev.width * dev.deviceScaleFactor,
-      maxHeight: dev.height * dev.deviceScaleFactor,
-      everyNthFrame: 1,
-    });
+    try {
+      await this.send('Page.startScreencast', {
+        format: 'jpeg',
+        quality: 70,
+        maxWidth: dev.width * dev.deviceScaleFactor,
+        maxHeight: dev.height * dev.deviceScaleFactor,
+        everyNthFrame: 1,
+      });
+    } catch (err) {
+      // Already running is the state we wanted.
+      if (!/already active/i.test(err.message)) throw err;
+    }
     this.casting = true;
     this.emit('status', this.status());
   }

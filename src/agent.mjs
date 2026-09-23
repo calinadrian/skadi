@@ -75,7 +75,7 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dont
 
 // Offered only when the matching tool exists, so a model is never told to
 // call something it does not have.
-const PLANNING_NOTE = `- For a bigger task with several parts, keep a short checklist with update_plan: 3-6 steps, then mark each step done as you finish it. Skip it for small tasks. If the user edits the plan, follow their version and never do skipped steps.`;
+const PLANNING_NOTE = `- For a bigger task with several parts, keep a short checklist with update_plan: 3-6 steps, then mark each step done as you finish it, in the same response as your next tool call. Skip it for small tasks. If the user edits the plan, follow their version and never do skipped steps.`;
 const DELEGATION_NOTE = `- For a broad search ("where is X handled?", "summarise this folder"), you can hand it to a read-only helper with delegate_task, reasoning "none". Keep edits and the final check for yourself.`;
 
 /** Assemble the system prompt from the base rules plus context blocks. */

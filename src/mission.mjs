@@ -24,6 +24,17 @@ const TICKET_FORMAT = `When you are done, end your final message with the ticket
 \`\`\`
 File only tickets worth a human's time. Do NOT change any files.`;
 
+/**
+ * Tools a Mission Control room never uses. Every schema rides on every
+ * request, and a small model picks worse from a longer list. The brief is the
+ * plan, so update_plan goes too; only the Research lab searches the web.
+ */
+const MISSION_OFF = ['remember', 'recall', 'forget', 'save_skill', 'update_plan', 'delegate_task',
+  'pixel_new', 'pixel_draw', 'pixel_view', 'pixel_import', 'pixel_export'];
+export function roomToolsOff(roomId) {
+  return roomId === 'research' ? MISSION_OFF : [...MISSION_OFF, 'web_search'];
+}
+
 export function roomBrief(roomId, { agent, project, approved = [], minutes = 0, target = 0 }) {
   const budget = [
     minutes ? `You have about ${minutes} minute(s). Pace yourself and finish with your report before time runs out.` : '',
