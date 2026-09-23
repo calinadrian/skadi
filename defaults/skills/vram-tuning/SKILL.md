@@ -1,9 +1,23 @@
 ---
 name: vram-tuning
 description: How to fit a GGUF model into a 16 GB GPU without spilling into system RAM.
+triggers: vram|out of (video )?memory|won'?t fit|doesn'?t fit|spill(ing|s)? (into|to) (system )?ram|kv cache|context (size|length) .{0,20}(gpu|memory)|gpu memory
 ---
 
 # Fitting a model in 16 GB
+
+## Quick start
+
+1. Read the measured numbers first (the Local AI tab, or the forecast panel
+   before launch). Shared memory used by llama-server above a few tens of MB
+   means it has spilled into system RAM, which is why it is slow.
+2. Fix it in this order, one change at a time, relaunching after each:
+   lower the context (`ctx`) -> set the KV cache to `q8_0` -> close the
+   browser and other GPU apps -> a smaller quant -> turn off speculative
+   decoding.
+3. Only lower `-ngl` (layers on the GPU) as a last resort: it prevents a
+   crash but is usually slower than a smaller context.
+4. Report the before and after numbers you measured, not estimates.
 
 A 16 GB card reports about 15.9 GiB usable. The desktop compositor, a browser and
 any Electron apps hold roughly 1.5–2.5 GiB of that before a model loads, so the

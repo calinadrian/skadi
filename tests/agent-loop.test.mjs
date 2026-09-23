@@ -63,26 +63,27 @@ const run = async (mutates, { stopOnLoop = false } = {}) => {
   }
 };
 
-test('semantic loop detection prunes a bad read-only cycle and redirects the next request', async () => {
+test('a semantic progress check adds one hint and never removes the evidence', async () => {
   const { messages, archived, bodies } = await run(false);
-  assert.equal(messages.some((m) => m.role === 'tool'), false);
-  assert.equal(archived.some((m) => m.role === 'tool'), true);
+  assert.equal(messages.some((m) => m.role === 'tool'), true, 'a judgement call must not delete what the model learned');
+  assert.equal(archived.length, 0);
   assert.equal(messages.at(-1).content, 'focused result');
-  assert.match(bodies[1].messages.at(-1).content, /progress supervisor detected a loop/i);
-  assert.match(bodies[1].messages.at(-1).content, /run the direct test/i);
+  const guidance = bodies[1].messages.at(-1).content;
+  assert.match(guidance, /progress check found your last step added nothing new/i);
+  assert.match(guidance, /Next: .*run the direct test/i);
+  assert.equal((guidance.match(/^Next:/gm) || []).length, 1, 'exactly one instruction reaches the model');
 });
 
-test('semantic loop detection retains actions that may have side effects', async () => {
-  const { messages, archived, bodies } = await run(true);
+test('a semantic hint keeps actions that may have had side effects', async () => {
+  const { messages, archived } = await run(true);
   assert.equal(messages.some((m) => m.role === 'tool'), true);
   assert.equal(archived.length, 0);
-  assert.match(bodies[1].messages.at(-1).content, /record was retained/i);
 });
 
 test('a focused subagent hands control back on the first semantic loop', async () => {
   const { messages, archived, bodies } = await run(false, { stopOnLoop: true });
   assert.equal(bodies.length, 1, 'the child must not start another model round');
-  assert.equal(archived.some((m) => m.role === 'tool'), true);
+  assert.equal(archived.length, 0);
   assert.match(messages.at(-1).content, /handed back to the parent/i);
   assert.match(messages.at(-1).content, /repeated known evidence/i);
   assert.match(messages.at(-1).content, /run the direct test/i);
@@ -122,7 +123,10 @@ test('an identical read with identical output is caught even when the semantic r
     const messages = [{ role: 'user', content: 'fix the bug' }];
     await agent.run(messages);
     assert.equal(semanticReviews, 0, 'the deterministic guard should avoid an unnecessary model review');
-    assert.equal(archived.filter((m) => m.role === 'tool').length, 1);
+    assert.equal(archived.length, 0, 'the repeat stays in the chat, in place');
+    assert.equal(messages.filter((m) => m.role === 'tool' && m.aside === 'repeat').length, 1);
+    assert.equal(bodies[2].messages.filter((m) => m.role === 'tool').length, 1, 'the model sees the first result only');
+    assert.equal(bodies[2].messages.some((m) => 'aside' in m), false);
     assert.match(bodies[2].messages.at(-1).content, /returned the same evidence/i);
     assert.equal(messages.at(-1).content, 'changed approach');
   } finally {
@@ -236,8 +240,44 @@ test('a placeholder deliverable cannot be reported as finished', async () => {
     await agent.run(messages);
     assert.equal(requests, 5);
     assert.equal(messages.at(-1).content, 'Implemented real data and verified the site.');
-    assert.equal(archived.some((message) => message.content === 'The website is complete.'), true);
-    assert.match(bodies[2].messages.at(-1).content, /incomplete deliverables/i);
+    const setAside = messages.find((message) => message.content === 'The website is complete.');
+    assert.equal(setAside?.aside, 'unfinished', 'the premature answer stays in the chat, marked');
+    assert.equal(bodies[2].messages.some((message) => message.content === 'The website is complete.'), false, 'and the model no longer sees it');
+    assert.match(bodies[2].messages.at(-1).content, /still have placeholder or empty content/i);
+  } finally {
+    server.close();
+  }
+});
+
+test('a finish gate sends the model back once, then lets the turn end', async () => {
+  let requests = 0;
+  const server = createServer(async (req, res) => {
+    for await (const chunk of req) void chunk;
+    requests++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (requests === 1) {
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'edit_file', arguments: JSON.stringify({ path: 'a.js', old_string: 'x', new_string: 'y' }) } }] } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+    } else {
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: `answer ${requests}` } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+    }
+    res.end('data: [DONE]\n\n');
+  });
+  const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
+  try {
+    const tools = { edit_file: { schema: {}, mutates: true, run: async () => 'edited' } };
+    const agent = new Agent({
+      provider: { id: 'fake', kind: 'openai', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'k' },
+      model: 'm',
+      tools,
+      schemas: [{ type: 'function', function: { name: 'edit_file', parameters: {} } }],
+      settings: { maxToolRounds: 0, loopDetection: false, permissionMode: 'bypassPermissions', compaction: { auto: false } },
+    });
+    const messages = [{ role: 'user', content: 'fix the typo in a.js' }];
+    await agent.run(messages);
+    assert.equal(requests, 3, 'one send-back for the unchecked edit, then the answer stands');
+    assert.equal(messages.at(-1).content, 'answer 3');
   } finally {
     server.close();
   }

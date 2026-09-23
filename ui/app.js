@@ -543,16 +543,31 @@ function renderMarkdown(src) {
 // Chat rendering
 // ============================================================================
 
+// The chat follows new output only while you are at the bottom of it. Scroll
+// up and it stays where you put it; "Jump to latest" appears while there is
+// newer output below.
 let pinned = true;
 function scrollDown(force) {
   const box = $('messages');
-  if (!force && !pinned) return;
+  if (force) pinned = true;
+  if (!pinned) {
+    $('jumpLatest').hidden = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    return;
+  }
   box.scrollTop = box.scrollHeight;
+  $('jumpLatest').hidden = true;
 }
 $('messages').addEventListener('scroll', () => {
   const box = $('messages');
   pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-});
+  if (pinned) $('jumpLatest').hidden = true;
+}, { passive: true });
+$('jumpLatest').onclick = () => {
+  const box = $('messages');
+  pinned = true;
+  $('jumpLatest').hidden = true;
+  box.scrollTo({ top: box.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+};
 
 function addMessage(role, text, extras) {
   $('emptyState')?.remove();
@@ -573,9 +588,13 @@ function beginAssistant() {
   const wrap = el('div', 'msg assistant');
   wrap.append(el('div', 'role', 'assistant'));
 
+  // Reasoning stays folded while it streams: a one-line preview in the summary
+  // shows it is alive without pushing the answer down the page every token.
   const think = el('details', 'think');
   think.hidden = true;
-  think.append(el('summary', null, 'reasoning'), el('div', 'think-body'));
+  const summary = el('summary');
+  summary.append(el('span', 'think-label', 'Thinking…'), el('span', 'think-peek'));
+  think.append(summary, el('div', 'think-body'));
 
   const body = el('div', 'body');
   const meta = el('div', 'msg-meta');
@@ -588,8 +607,16 @@ function beginAssistant() {
     bodyEl: body,
     thinkEl: think,
     thinkBody: think.querySelector('.think-body'),
+    thinkLabel: think.querySelector('.think-label'),
+    thinkPeek: think.querySelector('.think-peek'),
+    thinkPending: '',
+    thinkTail: '',
+    thinkFrame: 0,
+    thinkStartedAt: null,
+    thinkDone: false,
     metaEl: meta,
     frame: 0,
+    lastRender: 0,
     chars: 0,
     startedAt: null,
   };
@@ -597,15 +624,90 @@ function beginAssistant() {
   scrollDown();
 }
 
-/** Re-render the streaming message, coalesced to one repaint per frame. */
+/**
+ * Re-render the streaming message. Coalesced to one repaint per frame, and
+ * spaced out further as the answer grows: the whole message is re-parsed as
+ * markdown each time, so a long answer rendered every frame made the window
+ * stutter while it streamed.
+ */
 function scheduleRender() {
   const s = state.streaming;
   if (!s || s.frame) return;
-  s.frame = requestAnimationFrame(() => {
-    s.frame = 0;
-    s.bodyEl.replaceChildren(renderMarkdown(s.raw));
+  const gap = s.raw.length > 12000 ? 220 : s.raw.length > 4000 ? 110 : 0;
+  const wait = Math.max(0, s.lastRender + gap - performance.now());
+  const paint = () => {
+    s.frame = requestAnimationFrame(() => {
+      s.frame = 0;
+      s.lastRender = performance.now();
+      s.bodyEl.replaceChildren(renderMarkdown(s.raw));
+      scrollDown();
+    });
+  };
+  if (wait > 0) s.frame = setTimeout(() => { s.frame = 0; paint(); }, wait);
+  else paint();
+}
+
+/** Stream reasoning into its fold, one DOM write per frame. */
+function scheduleThink(s) {
+  if (s.thinkFrame) return;
+  s.thinkFrame = requestAnimationFrame(() => {
+    s.thinkFrame = 0;
+    const text = s.thinkPending;
+    s.thinkPending = '';
+    if (!text) return;
+    const body = s.thinkBody;
+    // Follow new text only when the reader is already at the end of it.
+    const following = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+    body.append(document.createTextNode(text));
+    s.thinkTail = (s.thinkTail + text).slice(-400);
+    const lines = s.thinkTail.split('\n').map((line) => line.trim()).filter(Boolean);
+    s.thinkPeek.textContent = lines.at(-1) || '';
+    const secs = Math.max(1, Math.round((Date.now() - s.thinkStartedAt) / 1000));
+    s.thinkLabel.textContent = `Thinking… ${secs}s`;
+    if (s.thinkEl.open && following) body.scrollTop = body.scrollHeight;
     scrollDown();
   });
+}
+
+/** Reasoning is over once the answer or a tool call starts. */
+function finishThinking(s) {
+  if (!s || s.thinkDone || !s.thinkStartedAt) return;
+  s.thinkDone = true;
+  if (s.thinkPending) {
+    s.thinkBody.append(document.createTextNode(s.thinkPending));
+    s.thinkPending = '';
+  }
+  const secs = Math.max(1, Math.round((Date.now() - s.thinkStartedAt) / 1000));
+  s.thinkLabel.textContent = `Thought for ${fmtDur(secs * 1000)}`;
+  s.thinkPeek.textContent = '';
+}
+
+/**
+ * A short line in the transcript whenever Skadi steers the agent: a repeated
+ * step, a progress check, or an answer sent back because the work was not
+ * finished. Without it the agent seems to change its mind for no reason.
+ */
+function addAdvisorNote(d) {
+  const finish = d.kind === 'finish';
+  if (finish) {
+    // The answer it tried to end with was set aside; say so on the bubble.
+    const bubble = state.lastAssistant?.bodyEl?.closest('.msg');
+    if (bubble && bubble.querySelector('.body')?.textContent.trim()) bubble.classList.add('superseded');
+  }
+  const title = finish ? 'Not finished yet' : d.kind === 'repeat' ? 'Repeated step' : 'Progress check';
+  const note = el('div', `advisor-note ${finish ? 'finish' : ''}`);
+  note.setAttribute('role', 'note');
+  const text = el('div', 'advisor-text');
+  text.append(el('strong', null, title));
+  const reason = String(d.reason || '').trim();
+  const next = String(d.next || '').trim();
+  // Reasons can open with a tool name ("list_dir was called again"), so they
+  // keep their case; the suggested next step is always a sentence.
+  if (reason) text.append(el('span', null, /[.!?]$/.test(reason) ? reason : `${reason}.`));
+  if (next) text.append(el('span', 'advisor-next', `Next: ${next.charAt(0).toUpperCase()}${next.slice(1)}`));
+  note.append(icon(finish ? 'warn' : 'restart'), text);
+  $('messages').append(note);
+  scrollDown();
 }
 
 /** Rough live rate while tokens arrive; replaced by the exact figure on stats. */
@@ -680,6 +782,7 @@ function resetCtx() {
 const TOOL_KIND = {
   run_command: 'command', write_file: 'create', edit_file: 'edit', delete_file: 'delete',
   read_file: 'read', list_dir: 'search', glob: 'search', grep: 'search',
+  pixel_new: 'pixel', pixel_draw: 'pixel', pixel_view: 'pixel', pixel_import: 'pixel', pixel_export: 'create',
 };
 
 const firstLine = (text) => String(text ?? '').split('\n').find((l) => l.trim())?.trim() || '';
@@ -709,6 +812,11 @@ function toolLabel(name, args) {
     case 'web_search': return { verb: 'Searched the web', target: args?.query || '' };
     case 'task_log': return { verb: 'Read a task log' };
     case 'task_stop': return { verb: 'Stopped a task' };
+    case 'pixel_new': return { verb: args?.from ? 'Copied canvas' : 'Started canvas', target: args?.name || '' };
+    case 'pixel_draw': return { verb: 'Drew on', target: args?.name || 'the canvas' };
+    case 'pixel_view': return { verb: 'Looked at', target: args?.name || 'the canvas' };
+    case 'pixel_export': return { verb: 'Exported', file: path };
+    case 'pixel_import': return { verb: 'Imported', file: path };
     case 'result': return { verb: 'Result' };
     default: {
       const words = String(name).replace(/_/g, ' ');
@@ -845,11 +953,11 @@ function setToolGroupOpen(group, open) {
 
 /** "Ran 4 commands, created a.mjs, used 2 tools" -- what the calls in a group add up to. */
 function summariseCalls(cards) {
-  const by = { command: 0, create: [], edit: [], delete: [], read: [], search: 0, other: 0 };
+  const by = { command: 0, create: [], edit: [], delete: [], read: [], search: 0, pixel: 0, other: 0 };
   for (const card of cards) {
     const kind = TOOL_KIND[card.dataset.tool];
     const path = card._args?.path ? String(card._args.path) : null;
-    if (kind === 'command' || kind === 'search') by[kind] += 1;
+    if (kind === 'command' || kind === 'search' || kind === 'pixel') by[kind] += 1;
     else if (kind) { if (!by[kind].includes(path)) by[kind].push(path); }
     else by.other += 1;
   }
@@ -865,6 +973,7 @@ function summariseCalls(cards) {
     files('deleted', by.delete),
     files('read', by.read),
     by.search ? `ran ${plural(by.search, 'search', 'searches')}` : null,
+    by.pixel ? `painted pixel art (${plural(by.pixel, 'step', 'steps')})` : null,
     by.other ? `used ${plural(by.other, 'tool', 'tools')}` : null,
   ].filter(Boolean);
   const line = parts.join(', ');
@@ -1428,22 +1537,39 @@ function toast(text) {
 }
 
 // ============================================================================
-// Per-chat execution plan. The server owns ordering and revision numbers; this
-// renderer replaces its local copy after every action, avoiding merge races
-// between the user and an agent that updates progress at the same time.
+// Per-chat plan. The server owns ordering and revision numbers; this renderer
+// replaces its local copy after every action, avoiding merge races between
+// the user and an agent that updates progress at the same time.
 // ============================================================================
 
 const PLAN_STATUS = [
-  ['queued', 'Queued'],
-  ['working', 'Working'],
+  ['queued', 'To do'],
+  ['working', 'In progress'],
   ['blocked', 'Blocked'],
   ['review', 'Needs review'],
   ['done', 'Done'],
   ['skipped', 'Skipped'],
 ];
+const PLAN_STATUS_LABEL = Object.fromEntries(PLAN_STATUS);
+
+// Plan and progress edits happen in a side panel, not in the conversation: a
+// refused edit is shown as a toast beside the work, never as an error message
+// in the chat transcript.
+const quiet = (fn) => async (...args) => {
+  try {
+    await fn(...args);
+  } catch (err) {
+    const text = String(err?.message || err || 'That did not work.');
+    toast(text.charAt(0).toUpperCase() + text.slice(1));
+  }
+};
 
 function emptyPlan() {
   return { version: 1, revision: 0, updatedAt: 0, userEdited: false, items: [], deleted: [] };
+}
+
+function planningEnabled() {
+  return state.settings?.planning !== false;
 }
 
 function acceptPlan(plan, { announce = false } = {}) {
@@ -1451,7 +1577,7 @@ function acceptPlan(plan, { announce = false } = {}) {
   renderPlan();
   if (announce) {
     const current = state.plan.items.find((item) => item.status === 'working');
-    $('planLive').textContent = current ? `Plan updated. Working on ${current.text}` : 'Plan updated.';
+    $('planLive').textContent = current ? `Plan updated. Now on: ${current.text}` : 'Plan updated.';
   }
 }
 
@@ -1462,8 +1588,16 @@ async function planAction(action, extra = {}) {
   return plan;
 }
 
-// ---- progress ledger: what the agent believes about its own progress ------
+// ---- progress: what the agent has done, and what the model is told --------
 const LEDGER_PHASES = ['locate', 'diagnose', 'implement', 'verify', 'complete'];
+const STAGE_NAMES = { locate: 'Find', diagnose: 'Understand', implement: 'Change', verify: 'Check', complete: 'Done' };
+const STAGE_HINTS = {
+  locate: 'Looking for the code that needs to change.',
+  diagnose: 'Reading the code to work out the cause.',
+  implement: 'Making the change.',
+  verify: 'Checking that the change works.',
+  complete: 'The change is made and checked.',
+};
 const NO_OVERRIDE = { dismissed: [], phase: '', note: '' };
 
 function acceptLedger({ ledger, state: saved } = {}) {
@@ -1479,16 +1613,18 @@ function ledgerViewNow() {
   if (!saved) return null;
   return {
     request: saved.request,
+    implementation: saved.implementation !== false,
     phase: saved.phase,
     materialEdits: saved.materialMutations,
     verifications: saved.verifications,
     inspected: saved.inspected || [],
     gaps: (saved.gaps || []).map(([key, reason]) => ({ key, reason })),
+    last: saved.last || '',
   };
 }
 
 async function ledgerAction(patch) {
-  if (!state.sessionId) throw new Error('Send the first message before editing its ledger.');
+  if (!state.sessionId) throw new Error('Send the first message before correcting its progress.');
   const result = await api('session/ledger', { id: state.sessionId, ...patch });
   if (patch.reset) {
     state.ledgerLive = null;
@@ -1497,9 +1633,28 @@ async function ledgerAction(patch) {
   acceptLedger(result);
 }
 
+/** "js/data.js: placeholder or empty required content remains" in plain words. */
+function gapLabel(gap) {
+  const where = gap.key === '(rendered output)' ? 'The page in the browser' : gap.key;
+  const why = /placeholder|empty/i.test(gap.reason || '') ? 'still shows placeholder or empty content' : gap.reason || 'is not finished';
+  return { where, why };
+}
+
+function ledgerStat(value, label) {
+  const tile = el('div', 'ledger-stat');
+  tile.append(el('strong', null, String(value ?? 0)), el('span', null, label));
+  return tile;
+}
+
 function renderLedger() {
   const body = $('ledgerBody');
   if (!body) return;
+  // A half-typed note must survive the live updates that arrive every step.
+  if (body.contains(document.activeElement) && document.activeElement.matches('textarea')) {
+    state.ledgerDirty = true;
+    return;
+  }
+  state.ledgerDirty = false;
   const view = ledgerViewNow();
   const override = state.ledgerOverride || NO_OVERRIDE;
   const dismissed = new Set(override.dismissed);
@@ -1507,59 +1662,145 @@ function renderLedger() {
   const count = $('ledgerTabCount');
   count.hidden = open === 0;
   count.textContent = String(open);
-  $('ledgerReset').disabled = !state.sessionId;
+  const tab = count.closest('[data-tool]');
+  if (tab) tab.setAttribute('aria-label', open ? `Progress, ${open} open problem${open === 1 ? '' : 's'}` : 'Progress');
+  $('ledgerReset').disabled = !state.sessionId || (!view && !override.note && !override.dismissed.length && !override.phase);
+
   if (!view) {
-    $('ledgerSummary').textContent = 'What the agent is told about its own progress each round.';
-    body.replaceChildren(el('p', 'ledger-hint', state.sessionId
-      ? 'No ledger yet. It appears once the agent has taken a step, and your corrections apply from the next round.'
-      : 'Start a chat first.'));
+    $('ledgerSummary').textContent = 'What Skadi has seen the agent do, and what it tells the model before each step.';
+    const empty = el('div', 'pane-empty');
+    empty.append(
+      icon('progress'),
+      el('strong', null, state.sessionId ? 'Nothing yet' : 'Start a chat first'),
+      el('span', null, state.sessionId
+        ? 'Once the agent takes its first step, this shows what it has looked at, changed and checked.'
+        : 'Progress is tracked per chat while the agent works.'),
+    );
+    body.replaceChildren(empty);
+    if (state.sessionId && (override.note || override.phase)) body.append(ledgerNoteSection(override));
     return;
   }
-  $('ledgerSummary').textContent = `${view.materialEdits ?? 0} deliverable edits · ${view.verifications ?? 0} verifications · ${open} open gap${open === 1 ? '' : 's'}`;
 
-  const request = el('p', 'ledger-request', view.request || '(unknown objective)');
+  const implementation = view.implementation !== false;
+  $('ledgerSummary').textContent = implementation
+    ? `${STAGE_NAMES[view.phase] || 'Working'} · ${open ? `${open} problem${open === 1 ? '' : 's'} to fix` : 'no open problems'}`
+    : 'Answering a question';
 
-  const phase = el('select', 'ledger-phase');
-  phase.setAttribute('aria-label', 'Phase');
-  phase.append(new Option('Automatic', ''));
-  for (const name of LEDGER_PHASES) phase.append(new Option(name[0].toUpperCase() + name.slice(1), name));
-  phase.value = override.phase || '';
-  phase.onchange = guard(() => ledgerAction({ phase: phase.value }));
-  const phaseRow = el('label', 'ledger-row', 'Phase');
-  phaseRow.append(phase, el('span', 'ledger-hint', override.phase ? `locked to ${override.phase}` : `currently ${view.phase}`));
+  const task = el('section', 'ledger-card');
+  const taskText = el('p', 'ledger-task', view.request || '(no task recorded)');
+  taskText.title = view.request || '';
+  task.append(el('h3', 'ledger-label', 'Task'), taskText);
 
-  const gaps = el('ul', 'ledger-gaps');
+  const parts = [task];
+
+  if (implementation) {
+    const stages = el('ol', 'stage-steps');
+    stages.setAttribute('aria-label', 'Stage');
+    const currentIndex = Math.max(0, LEDGER_PHASES.indexOf(view.phase));
+    LEDGER_PHASES.forEach((phase, index) => {
+      const step = el('li', index < currentIndex ? 'done' : index === currentIndex ? 'current' : '');
+      if (index === currentIndex) step.setAttribute('aria-current', 'step');
+      step.append(el('span', 'stage-dot'), el('span', 'stage-name', STAGE_NAMES[phase]));
+      stages.append(step);
+    });
+    const stageCard = el('section', 'ledger-card');
+    stageCard.append(el('h3', 'ledger-label', 'Stage'), stages, el('p', 'ledger-hint', STAGE_HINTS[view.phase] || ''));
+    if (override.phase) {
+      const pinned = el('div', 'ledger-pinned');
+      const unpin = el('button', 'btn', 'Unpin');
+      unpin.type = 'button';
+      unpin.onclick = quiet(() => ledgerAction({ phase: '' }));
+      pinned.append(el('span', null, `Pinned to “${STAGE_NAMES[override.phase]}” by an earlier correction.`), unpin);
+      stageCard.append(pinned);
+    }
+    parts.push(stageCard);
+  }
+
+  const stats = el('section', 'ledger-stats');
+  stats.append(ledgerStat((view.inspected || []).length, 'looked at'));
+  if (implementation) stats.append(ledgerStat(view.materialEdits, 'files changed'), ledgerStat(view.verifications, 'checks passed'));
+  parts.push(stats);
+
   const rows = view.gaps.map((gap) => ({ ...gap, dismissed: dismissed.has(gap.key) }));
   for (const key of dismissed) {
-    if (!rows.some((gap) => gap.key === key)) rows.push({ key, reason: '(no longer detected)', dismissed: true });
+    if (!rows.some((gap) => gap.key === key)) rows.push({ key, reason: '', dismissed: true, stale: true });
   }
-  if (!rows.length) gaps.append(el('li', 'ledger-hint', 'No open gaps.'));
-  for (const gap of rows) {
-    const li = el('li', gap.dismissed ? 'ledger-gap dismissed' : 'ledger-gap');
-    const button = el('button', 'btn tiny', gap.dismissed ? 'Restore' : 'Dismiss');
-    button.type = 'button';
-    button.title = gap.dismissed ? 'Show this gap to the agent again' : 'Tell the agent this gap is not real';
-    button.onclick = guard(() => ledgerAction(gap.dismissed ? { restoreGap: gap.key } : { dismissGap: gap.key }));
-    li.append(el('span', null, `${gap.key}: ${gap.reason}`), button);
-    gaps.append(li);
+  if (implementation || rows.length) {
+    const problems = el('section', 'ledger-card');
+    problems.append(el('h3', 'ledger-label', 'Problems it must fix before finishing'));
+    if (!rows.length) {
+      const ok = el('p', 'ledger-ok');
+      ok.append(icon('check'), el('span', null, 'None found.'));
+      problems.append(ok);
+    } else {
+      const list = el('ul', 'ledger-gaps');
+      for (const gap of rows) {
+        const li = el('li', gap.dismissed ? 'ledger-gap dismissed' : 'ledger-gap');
+        const { where, why } = gapLabel(gap);
+        const text = el('div', 'ledger-gap-text');
+        text.append(el('strong', null, where), el('span', null, gap.stale ? 'no longer detected' : gap.dismissed ? 'you marked this as fine' : why));
+        const button = el('button', 'btn', gap.dismissed ? 'Undo' : 'Not a problem');
+        button.type = 'button';
+        button.title = gap.dismissed ? 'Show this problem to the agent again' : 'Tell the agent this is fine and it can finish without changing it';
+        button.onclick = quiet(() => ledgerAction(gap.dismissed ? { restoreGap: gap.key } : { dismissGap: gap.key }));
+        li.append(text, button);
+        list.append(li);
+      }
+      problems.append(list);
+    }
+    parts.push(problems);
   }
 
+  if (view.last) {
+    const last = el('section', 'ledger-card');
+    const text = el('p', 'ledger-last', view.last);
+    text.title = view.last;
+    last.append(el('h3', 'ledger-label', 'Last step'), text);
+    parts.push(last);
+  }
+
+  parts.push(ledgerNoteSection(override));
+  body.replaceChildren(...parts);
+}
+
+/** The one free-text correction the model reads before every step. */
+function ledgerNoteSection(override) {
+  const section = el('section', 'ledger-card ledger-note-card');
+  const id = 'ledgerNoteInput';
+  const label = el('label', 'ledger-label', 'Tell the agent');
+  label.htmlFor = id;
+  const hint = el('p', 'ledger-hint', 'Shown to the model before every step, above everything else. Use it to correct a wrong belief.');
   const note = el('textarea', 'ledger-note');
+  note.id = id;
   note.rows = 3;
   note.maxLength = 800;
-  note.placeholder = 'A correction the agent must follow, e.g. "The fix is done and tests pass; just report the result."';
+  note.placeholder = 'e.g. "The tests already pass. Just summarise what changed."';
   note.value = override.note || '';
-  const save = el('button', 'btn tiny', 'Save note');
+  const actions = el('div', 'ledger-note-actions');
+  const status = el('span', 'ledger-note-status', override.note ? 'Active — the agent sees this note.' : '');
+  const save = el('button', 'btn primary', 'Save note');
   save.type = 'button';
-  save.onclick = guard(() => ledgerAction({ note: note.value }));
-
-  body.replaceChildren(
-    request,
-    phaseRow,
-    el('h3', 'ledger-h', 'Open gaps'), gaps,
-    el('h3', 'ledger-h', 'Your correction'), note, save,
-    el('p', 'ledger-hint', `Inspected: ${(view.inspected || []).join(', ') || '(none)'}`),
-  );
+  const clear = el('button', 'btn', 'Clear');
+  clear.type = 'button';
+  clear.hidden = !override.note;
+  const sync = () => { save.disabled = note.value.trim() === (override.note || '').trim(); };
+  note.addEventListener('input', sync);
+  note.addEventListener('blur', () => { if (state.ledgerDirty) setTimeout(renderLedger, 0); });
+  note.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); save.click(); }
+  });
+  save.onclick = quiet(async () => {
+    await ledgerAction({ note: note.value.trim() });
+    toast(note.value.trim() ? 'Note saved. The agent reads it before its next step.' : 'Note cleared.');
+  });
+  clear.onclick = quiet(async () => {
+    await ledgerAction({ note: '' });
+    toast('Note cleared.');
+  });
+  sync();
+  actions.append(status, clear, save);
+  section.append(label, hint, note, actions);
+  return section;
 }
 
 function planIconButton(name, label, onClick, disabled = false) {
@@ -1571,9 +1812,11 @@ function planIconButton(name, label, onClick, disabled = false) {
   const glyph = icon(name);
   glyph.setAttribute('aria-hidden', 'true');
   button.append(glyph);
-  button.onclick = guard(onClick);
+  button.onclick = quiet(onClick);
   return button;
 }
+
+const PLAN_MARK = { done: 'check', blocked: 'warn', skipped: 'x', review: 'eye' };
 
 let draggedPlanItem = null;
 
@@ -1581,14 +1824,34 @@ function renderPlan() {
   const plan = state.plan || emptyPlan();
   const list = $('planList');
   if (!list) return;
+  // Agent updates arrive while the user may be typing a step: replacing the
+  // row would throw the text and the caret away. Catch up on blur instead.
+  if (list.contains(document.activeElement) && document.activeElement.matches('.plan-text')) {
+    state.planDirty = true;
+    return;
+  }
+  state.planDirty = false;
+  const enabled = planningEnabled();
   const open = plan.items.filter((item) => !['done', 'skipped'].includes(item.status));
   const done = plan.items.filter((item) => item.status === 'done').length;
+  const counted = plan.items.filter((item) => item.status !== 'skipped').length;
   const working = plan.items.find((item) => item.status === 'working');
-  $('planSummary').textContent = plan.items.length
-    ? `${done} of ${plan.items.length} complete${open.length ? ` · ${open.length} open` : ''}`
-    : 'The agent will create a plan for substantial work.';
+  $('planSummary').textContent = !enabled
+    ? 'Planning is off in Settings, so the agent will not keep a plan.'
+    : plan.items.length
+      ? working ? `Now: ${working.text}` : open.length ? `${open.length} step${open.length === 1 ? '' : 's'} left` : 'All steps finished.'
+      : 'A checklist the agent keeps for bigger tasks.';
   $('planAdd').disabled = !state.sessionId;
-  $('planAdd').title = state.sessionId ? 'Insert a new step' : 'Send the first message before adding steps';
+  $('planAdd').title = state.sessionId ? 'Add a step to the end of the plan' : 'Send the first message before adding steps';
+  $('planClear').hidden = !plan.items.length;
+  $('planFoot').hidden = !plan.items.length;
+
+  const progress = $('planProgress');
+  progress.hidden = !plan.items.length;
+  if (plan.items.length) {
+    $('planProgressFill').style.width = `${counted ? Math.round((done / counted) * 100) : 100}%`;
+    $('planProgressText').textContent = `${done} of ${counted} done`;
+  }
 
   const tabCount = $('planTabCount');
   tabCount.hidden = open.length === 0;
@@ -1597,25 +1860,81 @@ function renderPlan() {
   if (planTab) planTab.setAttribute('aria-label', open.length ? `Plan, ${open.length} open steps` : 'Plan');
 
   if (!plan.items.length) {
-    list.replaceChildren();
-    const empty = el('li', 'plan-empty');
+    const empty = el('li', 'pane-empty');
     empty.append(
-      icon('list'),
+      icon('checklist'),
       el('strong', null, state.sessionId ? 'No plan yet' : 'Start a chat first'),
-      el('span', null, state.sessionId
-        ? 'For medium and hard work, the agent creates a plan before broad exploration. You can also add the first step.'
-        : 'A plan is saved with each chat and appears here as work begins.'),
+      el('span', null, !enabled
+        ? 'Turn planning back on under Settings › Agent to let the agent keep a checklist.'
+        : state.sessionId
+          ? 'For bigger tasks the agent writes a short checklist here. You can also add the first step yourself.'
+          : 'Each chat keeps its own plan.'),
     );
-    list.append(empty);
+    list.replaceChildren(empty);
   } else {
     const rows = plan.items.map((item, index) => {
+      const number = index + 1;
       const row = el('li', `plan-item status-${item.status}`);
       row.dataset.planId = item.id;
+
+      const check = el('button', 'plan-check');
+      check.type = 'button';
+      const finished = item.status === 'done';
+      check.setAttribute('aria-pressed', String(finished));
+      check.setAttribute('aria-label', finished ? `Mark step ${number} as not done` : `Mark step ${number} as done`);
+      check.title = finished ? 'Mark as not done' : 'Mark as done';
+      if (PLAN_MARK[item.status]) {
+        const glyph = icon(PLAN_MARK[item.status]);
+        glyph.setAttribute('aria-hidden', 'true');
+        check.append(glyph);
+      }
+      check.onclick = quiet(() => planAction('status', { itemId: item.id, status: finished ? 'queued' : 'done' }));
+
+      const body = el('div', 'plan-item-body');
+      const input = el('input', 'plan-text');
+      input.type = 'text';
+      input.value = item.text;
+      input.maxLength = 240;
+      input.setAttribute('aria-label', `Step ${number}`);
+      input.title = item.text;
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
+        if (event.key === 'Escape') { input.value = item.text; input.blur(); }
+      });
+      input.addEventListener('blur', quiet(async () => {
+        const text = input.value.trim();
+        // The row may belong to a step that was deleted while it had focus.
+        const exists = state.plan.items.some((step) => step.id === item.id);
+        if (exists && text && text !== item.text) await planAction('edit', { itemId: item.id, text });
+        else if (!text) input.value = item.text;
+        if (state.planDirty) renderPlan();
+      }));
+
+      const meta = el('div', 'plan-item-meta');
+      const status = el('select', 'plan-status');
+      status.setAttribute('aria-label', `Status of step ${number}`);
+      for (const [value, label] of PLAN_STATUS) {
+        const option = el('option', null, label);
+        option.value = value;
+        option.selected = item.status === value;
+        status.append(option);
+      }
+      status.onchange = quiet(() => planAction('status', { itemId: item.id, status: status.value }));
+      meta.append(el('span', 'plan-num', `Step ${number}`), status);
+      if (item.userEdited) meta.append(el('span', 'plan-tag', 'edited by you'));
+      if (item.note) {
+        const note = el('span', 'plan-note', item.note);
+        note.title = item.note;
+        meta.append(note);
+      }
+      body.append(input, meta);
+
+      const actions = el('div', 'plan-actions');
       const grip = el('span', 'plan-grip');
       grip.title = 'Drag to reorder';
       grip.setAttribute('aria-hidden', 'true');
       grip.draggable = true;
-      grip.append(icon('list'));
+      grip.append(icon('dots'));
       grip.addEventListener('dragstart', (event) => {
         draggedPlanItem = item.id;
         row.classList.add('dragging');
@@ -1633,55 +1952,19 @@ function renderPlan() {
         row.classList.add('drop-target');
       });
       row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
-      row.addEventListener('drop', guard(async (event) => {
+      row.addEventListener('drop', quiet(async (event) => {
         event.preventDefault();
         row.classList.remove('drop-target');
         if (!draggedPlanItem || draggedPlanItem === item.id) return;
         await planAction('move', { itemId: draggedPlanItem, index });
       }));
-
-      const body = el('div', 'plan-item-body');
-      const input = el('input', 'plan-text');
-      input.type = 'text';
-      input.value = item.text;
-      input.maxLength = 240;
-      input.setAttribute('aria-label', `Step ${index + 1}`);
-      input.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
-        if (event.key === 'Escape') { input.value = item.text; input.blur(); }
-      });
-      input.addEventListener('blur', guard(async () => {
-        const text = input.value.trim();
-        if (!text) { input.value = item.text; return; }
-        if (text !== item.text) await planAction('edit', { itemId: item.id, text });
-      }));
-
-      const meta = el('div', 'plan-item-meta');
-      const status = el('select', 'plan-status');
-      status.setAttribute('aria-label', `Status for ${item.text}`);
-      for (const [value, label] of PLAN_STATUS) {
-        const option = el('option', null, label);
-        option.value = value;
-        option.selected = item.status === value;
-        status.append(option);
-      }
-      status.onchange = guard(() => planAction('status', { itemId: item.id, status: status.value }));
-      meta.append(status);
-      if (item.note) {
-        const note = el('span', 'plan-note', item.note);
-        note.title = item.note;
-        meta.append(note);
-      }
-      body.append(input, meta);
-
-      const actions = el('div', 'plan-actions');
-      const up = planIconButton('chevron', `Move ${item.text} up`, () => planAction('move', { itemId: item.id, index: index - 1 }), index === 0);
+      const up = planIconButton('chevron', `Move step ${number} up`, () => planAction('move', { itemId: item.id, index: index - 1 }), index === 0);
       up.classList.add('move-up');
-      const down = planIconButton('chevron', `Move ${item.text} down`, () => planAction('move', { itemId: item.id, index: index + 1 }), index === plan.items.length - 1);
-      const remove = planIconButton('trash', `Delete ${item.text}`, () => planAction('remove', { itemId: item.id }));
+      const down = planIconButton('chevron', `Move step ${number} down`, () => planAction('move', { itemId: item.id, index: index + 1 }), index === plan.items.length - 1);
+      const remove = planIconButton('trash', `Delete step ${number}`, () => planAction('remove', { itemId: item.id }));
       remove.classList.add('danger-icon');
-      actions.append(up, down, remove);
-      row.append(grip, body, actions);
+      actions.append(grip, up, down, remove);
+      row.append(check, body, actions);
       return row;
     });
     list.replaceChildren(...rows);
@@ -1690,11 +1973,10 @@ function renderPlan() {
   const deleted = plan.deleted?.[0];
   $('planUndo').hidden = !deleted;
   if (deleted) $('planUndoText').textContent = `Deleted “${deleted.item.text}”.`;
-  $('planLive').textContent = working ? `Working: ${working.text}` : '';
 }
 
 function wirePlan() {
-  $('planAdd').onclick = guard(async () => {
+  $('planAdd').onclick = quiet(async () => {
     const before = new Set(state.plan.items.map((item) => item.id));
     const plan = await planAction('add', { text: 'New step' });
     const added = plan.items.find((item) => !before.has(item.id));
@@ -1704,7 +1986,15 @@ function wirePlan() {
       input?.select();
     });
   });
-  $('planUndoButton').onclick = guard(() => planAction('restore', {}));
+  $('planClear').onclick = quiet(async () => {
+    const ok = await askConfirm('Remove every step from this chat’s plan? The agent can write a new one for its next bigger task.', { title: 'Clear the plan', ok: 'Clear plan' });
+    if (ok) await planAction('clear');
+  });
+  $('planUndoButton').onclick = quiet(() => planAction('restore', {}));
+  $('ledgerReset').onclick = quiet(async () => {
+    const ok = await askConfirm('Forget what Skadi has recorded for this task and your notes? The agent starts its next step with a clean slate.', { title: 'Start over', ok: 'Start over' });
+    if (ok) await ledgerAction({ reset: true });
+  });
   renderPlan();
 }
 
@@ -2057,6 +2347,37 @@ function wireOverlays() {
       else if (!$('changesVeil').hidden) closeChanges();
     }
   });
+}
+
+/**
+ * The pixel art canvas the agent is painting, shown in the chat and updated
+ * in place as each drawing call lands: the user watches it take shape.
+ */
+const pixelFigures = new Map(); // "sessionId:name" -> figure
+function pixelFigure(name) {
+  const figure = el('figure', 'pixel-shot');
+  const img = el('img');
+  img.alt = `Pixel art canvas ${name}`;
+  figure.append(img, el('figcaption'));
+  return figure;
+}
+function showPixelCanvas({ sessionId, name, width, height, src }) {
+  const key = `${sessionId}:${name}`;
+  let figure = pixelFigures.get(key);
+  if (!figure || !figure.isConnected) {
+    $('emptyState')?.remove();
+    figure = pixelFigure(name);
+    $('messages').append(figure);
+    pixelFigures.set(key, figure);
+  }
+  const img = figure.querySelector('img');
+  img.src = src;
+  // Shown at a whole-number scale, never smoothed.
+  const scale = Math.max(1, Math.min(12, Math.floor(256 / Math.max(width, height))));
+  img.width = width * scale;
+  img.height = height * scale;
+  figure.querySelector('figcaption').textContent = `${name} · ${width}×${height} px`;
+  scrollDown();
 }
 
 /** A screenshot the agent captured, shown inline and in the side strip. */
@@ -3207,7 +3528,7 @@ function renderLoadedList(all) {
   $('btnEjectAll').hidden = all.filter((i) => !i.external).length < 2;
 
   if (!all.length) {
-    list.append(el('p', 'loaded-empty', 'Nothing is loaded. Pick a model below and press Load.'));
+    list.append(el('p', 'loaded-empty', 'Nothing loaded yet.'));
     return;
   }
   for (const inst of all) {
@@ -3311,7 +3632,7 @@ function renderShare() {
   const list = $('shareKeys');
   list.replaceChildren();
   if (!share.keys.length) {
-    list.append(el('p', 'hint', 'No keys yet — create one and hand it to a friend.'));
+    list.append(el('p', 'hint', 'No keys yet.'));
     return;
   }
   for (const k of share.keys) {
@@ -3550,9 +3871,10 @@ const FIELDS = [
 ];
 
 const SKADI_FIELDS = [
-  { key: 'loopDetection', label: 'Semantic loop detection', type: 'bool' },
-  { key: 'loopReviewEffort', label: 'Loop supervisor reasoning', type: 'select', options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
-  { key: 'loopReviewEvery', label: 'Semantic review cadence', type: 'range', min: 1, max: 10, step: 1, fmt: (v) => `every ${v} rounds` },
+  { key: 'loopDetection', label: 'Progress check (advisor)', type: 'bool' },
+  { key: 'planning', label: 'Plan checklist', type: 'bool' },
+  { key: 'loopReviewEffort', label: 'Progress check thinking', type: 'select', options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
+  { key: 'loopReviewEvery', label: 'Progress check every', type: 'range', min: 1, max: 10, step: 1, fmt: (v) => `every ${v} rounds` },
   { key: 'maxImplementationDiscoveryRounds', label: 'Discovery budget', type: 'range', min: 1, max: 20, step: 1 },
   { key: 'autoSubagents', label: 'Automatic research subagents', type: 'bool' },
   { key: 'autoSubagentReasoning', label: 'Subagent reasoning', type: 'select', options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
@@ -3771,7 +4093,7 @@ function applyProfileLock(id) {
   const locked = Boolean(state.config.profiles[id]?.catalog);
   $('profileLock').hidden = !locked;
   $('profileTemp').hidden = !state.config.profiles[id]?.temporary;
-  if (locked) $('profileLockVram').textContent = `${catalogGB()} GB`;
+  $('profileLock').title = locked ? `Tuned for a ${catalogGB()} GB GPU. Duplicate it to change anything.` : '';
   $('settings').inert = locked;
   $('settings').classList.toggle('locked', locked);
   $('btnFit').disabled = locked;
@@ -4568,6 +4890,8 @@ async function openSession(id) {
   // Tool results arrive as their own messages, but belong to the call that
   // produced them -- fold them back into that card.
   const cards = new Map();
+  // The last card that touched each pixel art canvas: its picture goes there.
+  const pixelCards = new Map();
   for (const [messageIndex, m] of session.messages.entries()) {
     if (m.role === 'system') continue;
     const anchor = el('span', 'message-anchor');
@@ -4582,6 +4906,10 @@ async function openSession(id) {
         card.classList.add(ok ? 'ok' : 'err');
         card.querySelector('.out').textContent = String(m.content ?? '').slice(0, 8000);
         updateFileChip(card, { content: m.content });
+        if (ok && /^pixel_(new|draw|view|import)$/.test(card.dataset.tool || '')) {
+          const named = card._args?.name || /"([A-Za-z0-9_-]{1,40})"/.exec(String(m.content ?? ''))?.[1];
+          if (named) pixelCards.set(named, card);
+        }
       } else {
         addTool('result', null, { content: m.content, ok });
       }
@@ -4594,11 +4922,26 @@ async function openSession(id) {
       for (const c of m.tool_calls) {
         const card = addTool(c.function.name, safeJson(c.function.arguments), null);
         card.dataset.callId = c.id;
+        // A repeated step the model no longer sees: kept in place, dimmed.
+        if (m.aside) card.classList.add('aside');
         cards.set(c.id, card);
       }
       continue;
     }
-    addMessage(m.role, contentToText(m.content), contentToThumbs(m.content));
+    const body = addMessage(m.role, contentToText(m.content), contentToThumbs(m.content));
+    // An answer a finish gate sent back: shown where it happened, marked.
+    if (m.aside && m.role === 'assistant') body.closest('.msg')?.classList.add('superseded');
+  }
+  // Each canvas this chat painted, as it stands now, after its last step.
+  for (const [name, card] of pixelCards) {
+    const anchor = card.closest('.tool-group') || card;
+    const figure = pixelFigure(name);
+    const img = figure.querySelector('img');
+    img.onload = () => { img.width = img.naturalWidth; img.height = img.naturalHeight; scrollDown(); };
+    img.src = `/api/pixel/png?session=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`;
+    figure.querySelector('figcaption').textContent = name;
+    anchor.after(figure);
+    pixelFigures.set(`${id}:${name}`, figure);
   }
   // Reopening a chat whose turn is still running: the saved transcript stops
   // at the user's message, so put the live part back on screen rather than
@@ -4874,18 +5217,17 @@ function applyAgentEvent(type, d, startedAt = null) {
     s.startedAt ??= startedAt ?? Date.now();
     s.chars += d.length;
     s.thinkEl.hidden = false;
-    // Open the reasoning pane while it streams so thinking is visible live.
-    s.thinkEl.open = true;
-    s.thinkBody.textContent += d;
-    s.thinkBody.scrollTop = s.thinkBody.scrollHeight;
+    s.thinkStartedAt ??= startedAt ?? Date.now();
+    s.thinkPending += d;
+    scheduleThink(s);
     setActivity('Thinking…');
     tickLiveRate();
-    scrollDown();
     return;
   }
   if (type === 'token') {
     if (!state.streaming) beginAssistant();
     const s = state.streaming;
+    finishThinking(s);
     s.startedAt ??= startedAt ?? Date.now();
     s.chars += d.length;
     s.raw += d;
@@ -4895,11 +5237,17 @@ function applyAgentEvent(type, d, startedAt = null) {
     return;
   }
   if (type === 'stats') {
+    finishThinking(state.lastAssistant);
     setMeta(state.lastAssistant, d);
     renderCtx(d.promptTokens, d.contextTokens);
     return;
   }
+  if (type === 'advisor') {
+    addAdvisorNote(d);
+    return;
+  }
   if (type === 'tool_call') {
+    finishThinking(state.streaming);
     state.streaming = null;
     addTool(d.name, d.args, null).dataset.callId = d.id;
     return;
@@ -5030,6 +5378,12 @@ function connect() {
     addScreenshot(shot.name);
   });
 
+  es.addEventListener('pixel_canvas', (e) => {
+    const d = JSON.parse(e.data);
+    if (d.sessionId && d.sessionId !== state.sessionId) return;
+    showPixelCanvas(d);
+  });
+
   es.addEventListener('browser_status', (e) => {
     const s = JSON.parse(e.data);
     // Another chat's browser: its status is none of this pane's business.
@@ -5039,8 +5393,15 @@ function connect() {
 
   es.addEventListener('web_search_status', (e) => {
     const status = JSON.parse(e.data);
-    if (status.state === 'ready') toast(`Local SearXNG is ready at ${status.url}`);
-    if (status.state === 'error') toast(status.error || 'Local SearXNG failed to start.');
+    const was = state.searchStatus?.state;
+    state.searchStatus = status;
+    refreshSearchRows();
+    // Announce transitions only: the stream replays the current status on
+    // every reconnect, and that is not news.
+    if (was && was !== status.state) {
+      if (status.state === 'ready') toast('Private search (SearXNG) is ready.');
+      if (status.state === 'error') toast(status.error || 'SearXNG could not start.');
+    }
   });
 
   // A draft chat was saved: its browser moved onto the new session id.
@@ -5160,13 +5521,14 @@ function connect() {
 
   es.addEventListener('agent_loop_detected', (e) => {
     const d = JSON.parse(e.data);
+    liveEvent('advisor', d);
     if (!isPendingView(d.sessionId)) return;
-    setActivity(`Loop corrected — ${d.next || 'redirecting to the shortest path…'}`);
+    setActivity(d.kind === 'finish' ? 'Not finished yet — continuing…' : 'Adjusting course…');
   });
 
   es.addEventListener('agent_loop_review_error', (e) => {
     const d = JSON.parse(e.data);
-    if (isPendingView(d.sessionId)) setActivity('Progress review unavailable — continuing normally…');
+    if (isPendingView(d.sessionId)) setActivity('Progress check unavailable — continuing normally…');
   });
 
   es.addEventListener('agent_approval_request', (e) => {
@@ -5878,7 +6240,6 @@ function wireToolDock() {
     if (name === 'review') openChanges();
   };
   for (const tab of tabs) tab.onclick = () => selectWorkspaceTool(tab.dataset.tool);
-  $('ledgerReset').onclick = guard(() => ledgerAction({ reset: true }));
   $('filesRefresh').onclick = () => refreshFilesTab({ force: true });
   $('filesFilter').addEventListener('input', () => {
     clearTimeout(files.timer);
@@ -6268,6 +6629,7 @@ The folder and its chat history are not touched.`,
 }
 
 
+$('btnUnlockProfile').onclick = () => $('btnDuplicateProfile').click();
 $('btnDuplicateProfile').onclick = guard(async () => {
   const id = state.editing;
   const source = state.config.profiles[id];
@@ -6353,6 +6715,12 @@ function setModelsTab(tab) {
   }
   refreshModels();
   $('mmCard').textContent = cardLine();
+  renderInstalledCount();
+}
+
+function renderInstalledCount() {
+  const n = (state.localModels || mm.local?.models || []).length;
+  $('mmInstalledCount').textContent = n ? String(n) : '';
 }
 
 async function openModels(tab) {
@@ -6361,13 +6729,14 @@ async function openModels(tab) {
     for (const job of (await api('hf/downloads')).jobs) mm.jobs.set(job.id, job);
   } catch { /* the list itself reports failures */ }
   renderDownloads();
-  if (!tab) {
-    try {
-      mm.local = await api('models/local');
-      tab = mm.local.models.length ? 'installed' : 'discover';
-    } catch { tab = 'installed'; }
+  setModelsTab(tab || 'discover');
+  // The footer's fit line is measured against the local card; fetch it whatever the tab.
+  if (!mm.local) {
+    api('models/local').then((local) => {
+      mm.local = local;
+      $('mmCard').textContent = cardLine();
+    }).catch(() => { /* the footer keeps its fallback */ });
   }
-  setModelsTab(tab);
 }
 
 function closeModels() {
@@ -6397,8 +6766,8 @@ async function refreshModels() {
 
 function cardLine() {
   const data = mm.local || mm.detail;
-  if (!data?.totalVramBytes) return 'GPU memory has not been measured yet, so fit verdicts are unavailable.';
-  return `Fit is judged against ${fmtGB(data.budgetBytes)} of your ${fmtGB(data.totalVramBytes)} VRAM, with an 8-bit KV cache.`;
+  if (!data?.totalVramBytes) return 'GPU memory not measured yet — no fit verdicts.';
+  return `Fit judged on ${fmtGB(data.budgetBytes)} of ${fmtGB(data.totalVramBytes)} VRAM · 8-bit KV cache`;
 }
 
 const mmButton = (label, { iconName, main = false, onClick, title } = {}) => {
@@ -6436,12 +6805,16 @@ async function chooseModelsFolder() {
 function renderInstalled() {
   const pane = $('mm-installed');
   const data = mm.local;
+  const scroll = pane.querySelector('.mm-list')?.scrollTop || 0;
   pane.replaceChildren();
 
   const bar = el('div', 'mm-bar');
-  bar.append(el('span', 'mm-path', data.dir));
-  bar.append(mmButton('Change folder…', { title: 'Where models are kept and downloads are saved', onClick: guard(chooseModelsFolder) }));
-  bar.append(mmButton('Add a file from disk…', { onClick: guard(addModelFromDisk) }));
+  const path = el('span', 'mm-path');
+  path.append(icon('folder'), el('span', null, data.dir));
+  path.title = data.dir;
+  bar.append(path);
+  bar.append(mmButton('Change', { title: 'Where models are kept and downloads are saved', onClick: guard(chooseModelsFolder) }));
+  bar.append(mmButton('Add file…', { iconName: 'plus', title: 'Use a GGUF file from anywhere on this computer', onClick: guard(addModelFromDisk) }));
   pane.append(bar);
 
   if (!data.models.length) {
@@ -6458,13 +6831,12 @@ function renderInstalled() {
     const main = el('div', 'mm-row-main');
     const title = el('div', 'mm-row-title');
     title.append(el('span', 'mm-name', m.name.replace(/\.gguf$/i, '')));
-    if (m.loaded) title.append(el('span', 'mm-tag', 'Loaded'));
+    if (m.loaded) title.append(el('span', 'mm-tag live', 'Loaded'));
     main.append(title);
 
-    const meta = [fmtGB(m.bytes), m.quant, m.trainCtx ? `${fmtCtx(m.trainCtx)} context` : null, m.mmproj ? 'Vision' : null];
-    main.append(el('div', 'mm-meta', meta.filter(Boolean).join('  ·  ')));
-
     const foot = el('div', 'mm-row-foot');
+    const meta = [fmtGB(m.bytes), m.quant, m.trainCtx ? `${fmtCtx(m.trainCtx)} ctx` : null, m.mmproj ? 'Vision' : null];
+    foot.append(el('span', 'mm-meta', meta.filter(Boolean).join(' · ')));
     foot.append(fitBadge(m.fit));
     const ready = m.profiles.filter((p) => p.catalog).length;
     if (ready) {
@@ -6493,12 +6865,9 @@ function renderInstalled() {
         await refreshModels();
       }
     });
-    const del = el('button', 'mm-delete', 'Delete');
-    del.type = 'button';
+    const del = mmIconButton('trash', m.loaded ? 'Eject the model before deleting it' : `Delete ${m.name} from this computer`);
+    del.classList.add('danger');
     del.disabled = m.loaded;
-    del.title = m.loaded
-      ? 'Eject the model before you can delete it'
-      : `Delete ${m.name} from the computer`;
     del.onclick = guard(async () => {
       const label = m.name.replace(/\.gguf$/i, '');
       if (!window.confirm(
@@ -6520,6 +6889,17 @@ function renderInstalled() {
     list.append(row);
   }
   pane.append(list);
+  list.scrollTop = scroll;
+}
+
+/** A square, icon-only button; the label lives in the tooltip and for screen readers. */
+function mmIconButton(iconName, label) {
+  const button = el('button', 'mm-icon-btn');
+  button.type = 'button';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.append(icon(iconName));
+  return button;
 }
 
 // ---- Catalog ------------------------------------------------------------------
@@ -6538,16 +6918,18 @@ function openDiscoverFor(entry) {
 function renderCatalog() {
   const pane = $('mm-catalog');
   const data = mm.catalog;
+  const scroll = pane.querySelector('.mm-scroll')?.scrollTop || 0;
   pane.replaceChildren();
 
-  const intro = el('div', 'mm-intro');
-  intro.append(el('b', null, `Tested profiles for a ${data.vramGB} GB GPU`));
-  intro.append(el('span', null, 'Each one is a ready-made setting for one model, measured on real hardware. Import the ones you want and they appear in your profile list; the rest stay here, out of the way. You can’t edit these, but you can customise a copy.'));
+  const bar = el('div', 'mm-bar mm-cat-bar');
+  const lead = el('span', 'mm-cat-lead');
+  lead.append(el('b', null, `Tested on a ${data.vramGB} GB GPU`), el('span', null, 'Load one as it is, or add it to your profiles.'));
+  bar.append(lead);
   const gib = data.totalVramBytes / GB;
   if (gib && Math.abs(gib - data.vramGB) > 1.5) {
-    intro.append(el('span', 'mm-warn', `Your GPU has ${gib.toFixed(0)} GB, so speed and context will differ from what is listed.`));
+    bar.append(el('span', 'mm-warn', `Your GPU has ${gib.toFixed(0)} GB, so your numbers will differ.`));
   }
-  pane.append(intro);
+  pane.append(bar);
 
   const families = new Map();
   for (const e of data.entries) {
@@ -6561,103 +6943,135 @@ function renderCatalog() {
     entries.sort((a, b) => (TIER_ORDER[a.info.tier] ?? 9) - (TIER_ORDER[b.info.tier] ?? 9));
     const section = el('section', 'mm-family');
     const head = el('header', 'mm-family-head');
-    head.append(el('h3', null, family));
+    const name = el('div', 'mm-family-name');
+    name.append(el('h3', null, family), el('span', 'mm-family-count', `${entries.length} profile${entries.length === 1 ? '' : 's'}`));
+    head.append(name);
     const cols = el('div', 'mm-cols');
     cols.append(el('span', null, 'Speed'), el('span', null, 'Quality'), el('span', null, 'Context'));
     cols.children[1].title = 'Perplexity (PPL) — lower is better';
-    head.append(cols);
+    head.append(cols, el('span'));
     section.append(head);
 
-    for (const e of entries) {
-      const row = el('div', `mm-profile${e.info.tier === 'weak' ? ' weak' : ''}${e.loaded ? ' loaded' : ''}`);
-      const main = el('div', 'mm-profile-main');
-      const title = el('div', 'mm-profile-title');
-      title.append(el('span', 'mm-name', `${e.info.quant}${e.info.mtp ? ' + MTP' : ''}`));
-      if (TIER_LABEL[e.info.tier]) title.append(el('span', `mm-tag ${e.info.tier}`, TIER_LABEL[e.info.tier]));
-      if (e.loaded) title.append(el('span', 'mm-tag', 'Loaded'));
-      main.append(title);
-      main.append(el('div', 'mm-note-line', e.info.note));
-
-      // The settings a power user will want to see, without opening anything.
-      const specs = [
-        e.info.kv ? `${e.info.kv} cache` : null,
-        e.info.engine && e.info.engine !== 'llama.cpp' ? `${e.info.engine} build` : null,
-        e.info.mtp ? 'MTP speedup' : null,
-        e.mmproj ? 'Vision' : null,
-      ].filter(Boolean);
-      main.append(el('div', 'mm-specs', specs.join('  ·  ')));
-
-      const missing = [
-        !e.have.model ? 'the model' : null,
-        e.have.mmproj === false ? 'vision file' : null,
-        e.have.draft === false ? 'MTP draft file' : null,
-      ].filter(Boolean);
-      if (missing.length && e.have.model) main.append(el('div', 'mm-missing', `Missing: ${missing.join(', ')}. It will load without ${missing.length > 1 ? 'them' : 'it'}.`));
-      if (!e.engine.ok) main.append(el('div', 'mm-missing', `Needs the ${e.info.engine} build at ${e.engine.exe}, which was not found.`));
-
-      const stats = el('div', 'mm-stats');
-      const speed = e.info.tps
-        ? (e.info.tps[0] === e.info.tps[1] ? `${e.info.tps[0]} t/s` : `${e.info.tps[0]}–${e.info.tps[1]} t/s`)
-        : '—';
-      stats.append(el('span', null, speed), el('span', null, e.info.ppl ? e.info.ppl.toFixed(2) : '—'), el('span', null, e.info.ctxLabel || '—'));
-
-      const actions = el('div', 'mm-actions');
-      if (!e.have.model) {
-        actions.append(mmButton('Get model', { iconName: 'download', onClick: () => openDiscoverFor(e) }));
-      } else if (e.loaded) {
-        actions.append(mmButton('Eject', { iconName: 'stop', onClick: guard(async () => { await api('server/stop', {}); await refreshModels(); }) }));
-      } else {
-        const load = mmButton('Load', { main: true, iconName: 'play' });
-        load.disabled = !e.engine.ok;
-        load.onclick = guard(async () => {
-          load.disabled = true;
-          try {
-            const res = await api('model/load', { name: e.model, profileId: e.id });
-            state.config = res.config;
-            await selectProfile(res.profileId);
-          } finally {
-            await refreshModels();
-          }
-        });
-        actions.append(load);
-      }
-      // Whether the profile is on the list in the Local AI tab. The catalog is
-      // where you pick; the list is what you keep.
-      const listed = mmButton(e.imported ? 'Imported' : 'Import', {
-        iconName: e.imported ? 'check' : 'plus',
-        title: e.imported
-          ? 'Remove it from your profile list. It stays in the catalog.'
-          : 'Add it to your profile list in the Local AI tab',
-      });
-      listed.classList.toggle('listed', Boolean(e.imported));
-      listed.onclick = guard(async () => {
-        listed.disabled = true;
-        try {
-          if (e.imported) await removeCatalogProfile(e.id);
-          else await importCatalogProfile(e.id);
-        } finally {
-          await refreshModels();
-        }
-      });
-      actions.append(listed);
-      const copy = el('button', 'mm-link', 'Customise');
-      copy.type = 'button';
-      copy.title = 'Make an editable copy of this profile';
-      copy.onclick = guard(async () => {
-        const res = await api('profile/duplicate', { profileId: e.id });
-        state.config = res.config;
-        closeModels();
-        selectWorkspaceTool?.('ai');
-        await selectProfile(res.profileId);
-      });
-      actions.append(copy);
-
-      row.append(main, stats, actions);
-      section.append(row);
+    // Superseded profiles stay reachable, folded under the rest -- unless
+    // they are all this model has.
+    const folds = entries.some((e) => e.info.tier !== 'weak');
+    const current = folds ? entries.filter((e) => e.info.tier !== 'weak') : entries;
+    const older = folds ? entries.filter((e) => e.info.tier === 'weak') : [];
+    for (const e of current) section.append(catalogRow(e));
+    if (older.length) {
+      mm.showOlder ??= new Set();
+      const open = mm.showOlder.has(family);
+      const toggle = el('button', `mm-more${open ? ' open' : ''}`);
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.append(icon('chevron'), el('span', null, open ? 'Hide superseded' : `${older.length} superseded`));
+      toggle.onclick = () => {
+        if (mm.showOlder.has(family)) mm.showOlder.delete(family);
+        else mm.showOlder.add(family);
+        renderCatalog();
+      };
+      section.append(toggle);
+      if (open) for (const e of older) section.append(catalogRow(e));
     }
     scroller.append(section);
   }
   pane.append(scroller);
+  scroller.scrollTop = scroll;
+}
+
+/** One tested profile: what it is, what it measured, and what you can do with it. */
+function catalogRow(e) {
+  const row = el('div', `mm-profile${e.info.tier ? ` ${e.info.tier}` : ''}${e.loaded ? ' loaded' : ''}`);
+  const main = el('div', 'mm-profile-main');
+  // The note mostly repeats what the tag and the numbers say; it is there on hover.
+  if (e.info.note) main.title = e.info.note;
+  const title = el('div', 'mm-profile-title');
+  title.append(el('span', 'mm-name', `${e.info.quant}${e.info.mtp ? ' + MTP' : ''}`));
+  if (TIER_LABEL[e.info.tier]) title.append(el('span', `mm-tag ${e.info.tier}`, TIER_LABEL[e.info.tier]));
+  if (e.loaded) title.append(el('span', 'mm-tag live', 'Loaded'));
+  main.append(title);
+
+  const chips = el('div', 'mm-chips');
+  for (const chip of [
+    e.info.kv ? `${e.info.kv} KV` : null,
+    e.info.engine && e.info.engine !== 'llama.cpp' ? e.info.engine : null,
+    e.mmproj ? 'Vision' : null,
+  ].filter(Boolean)) chips.append(el('span', 'mm-chip', chip));
+  if (chips.childElementCount) main.append(chips);
+
+  const missing = [
+    e.have.mmproj === false ? 'vision file' : null,
+    e.have.draft === false ? 'MTP draft' : null,
+  ].filter(Boolean);
+  if (missing.length && e.have.model) main.append(el('div', 'mm-missing', `No ${missing.join(' or ')} — loads without ${missing.length > 1 ? 'them' : 'it'}`));
+  if (!e.engine.ok) {
+    const warn = el('div', 'mm-missing', `Needs the ${e.info.engine} build`);
+    warn.title = `Not found at ${e.engine.exe}`;
+    main.append(warn);
+  }
+
+  const stats = el('div', 'mm-stats');
+  const speed = e.info.tps
+    ? (e.info.tps[0] === e.info.tps[1] ? `${e.info.tps[0]}` : `${e.info.tps[0]}–${e.info.tps[1]}`)
+    : null;
+  const speedCell = el('span', 'mm-speed');
+  if (speed) speedCell.append(el('b', null, speed), el('small', null, ' t/s'));
+  else speedCell.textContent = '—';
+  const ppl = el('span', null, e.info.ppl ? e.info.ppl.toFixed(2) : '—');
+  const ctx = el('span', null, e.info.ctxLabel || '—');
+  // Units for the narrow layout, where the column headings are hidden.
+  if (e.info.ppl) ppl.dataset.unit = 'PPL';
+  if (e.info.ctxLabel) ctx.dataset.unit = 'ctx';
+  stats.append(speedCell, ppl, ctx);
+
+  const actions = el('div', 'mm-actions');
+  if (!e.have.model) {
+    actions.append(mmButton('Get model', { iconName: 'download', onClick: () => openDiscoverFor(e) }));
+  } else if (e.loaded) {
+    actions.append(mmButton('Eject', { iconName: 'stop', onClick: guard(async () => { await api('server/stop', {}); await refreshModels(); }) }));
+  } else {
+    const load = mmButton('Load', { main: true, iconName: 'play' });
+    load.disabled = !e.engine.ok;
+    load.onclick = guard(async () => {
+      load.disabled = true;
+      try {
+        const res = await api('model/load', { name: e.model, profileId: e.id });
+        state.config = res.config;
+        await selectProfile(res.profileId);
+      } finally {
+        await refreshModels();
+      }
+    });
+    actions.append(load);
+  }
+  // Whether the profile is on the list in the Local AI tab. The catalog is
+  // where you pick; the list is what you keep.
+  const listed = mmIconButton(e.imported ? 'check' : 'plus', e.imported
+    ? 'In your profiles — click to remove (it stays here)'
+    : 'Add to your profiles');
+  listed.classList.toggle('on', Boolean(e.imported));
+  listed.setAttribute('aria-pressed', String(Boolean(e.imported)));
+  listed.onclick = guard(async () => {
+    listed.disabled = true;
+    try {
+      if (e.imported) await removeCatalogProfile(e.id);
+      else await importCatalogProfile(e.id);
+    } finally {
+      await refreshModels();
+    }
+  });
+  const copy = mmIconButton('edit', 'Customise — make an editable copy');
+  copy.onclick = guard(async () => {
+    const res = await api('profile/duplicate', { profileId: e.id });
+    state.config = res.config;
+    closeModels();
+    selectWorkspaceTool?.('ai');
+    await selectProfile(res.profileId);
+  });
+  actions.append(listed, copy);
+
+  row.append(main, stats, actions);
+  return row;
 }
 
 // ---- Hugging Face ----------------------------------------------------------
@@ -6868,7 +7282,7 @@ function onDownloadEvent(job) {
     }
   }
   if ($('modelsVeil').hidden) {
-    if (job.state === 'done' && before !== 'done') toast(`Downloaded ${job.meta?.model || job.repo}. Open Browse models to load it.`);
+    if (job.state === 'done' && before !== 'done') toast(`Downloaded ${job.meta?.model || job.repo}. Pick it under Load a model.`);
     if (job.state === 'failed' && before !== 'failed') toast(`Download failed: ${job.error}`);
     return;
   }
@@ -6921,6 +7335,7 @@ async function refreshQuickModels() {
   try {
     state.localModels = (await api('models/local')).models;
     renderLoadArea();
+    renderInstalledCount();
   } catch { /* offline or restarting: leave the list as it was */ }
 }
 
@@ -7003,7 +7418,7 @@ function renderLoadArea() {
     return row;
   };
   for (const [id, p] of profiles) {
-    const sub = [p.catalog ? 'Skadi catalog' : p.temporary ? 'Default settings, not saved' : 'Your profile', p.ctx ? `${fmtCtx(p.ctx)} context` : null, p.cacheK ? `${p.cacheK} cache` : null].filter(Boolean).join(' · ');
+    const sub = [p.catalog ? 'Catalog' : p.temporary ? 'Unsaved defaults' : 'Yours', p.ctx ? `${fmtCtx(p.ctx)} context` : null, p.cacheK ? `${p.cacheK} cache` : null].filter(Boolean).join(' · ');
     const actions = el('span', 'load-opt-actions');
     const stop = (fn) => (e) => { e.preventDefault(); e.stopPropagation(); guard(fn)(); };
     if (p.temporary) {
@@ -7030,7 +7445,7 @@ function renderLoadArea() {
   // Profile and Forecast panels never describe some other model's settings.
   // Once it exists it is listed above as its own row.
   if (!profiles.length) {
-    group.append(option('default', 'Default settings', 'Sized to the memory you have free. Not kept unless you save them.'));
+    group.append(option('default', 'Default settings', 'Sized to your free VRAM'));
     const model = state.loadModel;
     if (!state.defaulting.has(model)) {
       state.defaulting.add(model);
@@ -7042,11 +7457,11 @@ function renderLoadArea() {
 
   // Ways to get more settings than these.
   const links = $('loadLinks');
-  links.replaceChildren(linkButton('+ New profile…', guard(newProfileForModel)));
+  links.replaceChildren(linkButton('+ New profile', guard(newProfileForModel)));
   const model = models.find((m) => m.name.toLowerCase() === state.loadModel.toLowerCase());
   const imported = new Set(state.config.catalogImported || []);
   const more = model.catalog.filter((p) => !imported.has(p.id)).length;
-  if (more) links.append(linkButton(`${more} tested profile${more === 1 ? '' : 's'} in the catalog`, () => openModels('catalog')));
+  if (more) links.append(linkButton(`${more} more in the catalog`, () => openModels('catalog')));
 
   const busy = state.loading.has(loadKey());
   const already = state.loadProfile !== 'default' && isLoaded(state.loadProfile);
@@ -7055,7 +7470,7 @@ function renderLoadArea() {
 
   const held = [...state.instances.values()].reduce((sum, i) => sum + ((state.vramByModel.get(i.id) || i.vram)?.dedicated || 0), 0);
   $('loadHint').textContent = held && !already
-    ? `${gb(held)} of VRAM is held by loaded models. This one is fitted into what is left.`
+    ? `Fitted around the ${gb(held)} already loaded.`
     : '';
 }
 
@@ -7362,13 +7777,37 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-for (const head of document.querySelectorAll('.panel-head.collapse')) {
-  head.onclick = () => {
-    const target = $(head.dataset.toggle);
-    target.hidden = !target.hidden;
-    head.classList.toggle('open', !target.hidden);
-  };
+// Local AI panels fold from their header. Which ones are open is a per-browser
+// convenience; a panel marked data-fold-default="closed" starts folded.
+const FOLD_KEY = 'skadi.aiFolds';
+
+function wireAiPanels() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}') || {}; } catch { /* storage unavailable */ }
+  for (const panel of document.querySelectorAll('.panel[data-fold]')) {
+    const key = panel.dataset.fold;
+    const head = panel.querySelector(':scope > .panel-head');
+    const setOpen = (open) => {
+      panel.classList.toggle('folded', !open);
+      head.setAttribute('aria-expanded', String(open));
+    };
+    setOpen(key in saved ? saved[key] : panel.dataset.foldDefault !== 'closed');
+    head.tabIndex = 0;
+    head.setAttribute('role', 'button');
+    const toggle = () => {
+      const open = panel.classList.contains('folded');
+      setOpen(open);
+      saved[key] = open;
+      try { localStorage.setItem(FOLD_KEY, JSON.stringify(saved)); } catch { /* storage unavailable */ }
+    };
+    // The header's own buttons (Get models, Eject all, +, …) keep their jobs.
+    head.addEventListener('click', (e) => { if (!e.target.closest('button, input, select, a')) toggle(); });
+    head.addEventListener('keydown', (e) => {
+      if (e.target === head && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggle(); }
+    });
+  }
 }
+wireAiPanels();
 
 // ============================================================================
 // Settings modal
@@ -7418,6 +7857,7 @@ const settingsNoMatch = $('settingsNoMatch');
 let advancedOpen = false;
 
 function openSettings(section = null) {
+  api('search/status').then((status) => { state.searchStatus = status; refreshSearchRows(); }).catch(() => {});
   $('settingsSearch').value = '';
   settingsQuery = '';
   if (section) activeSettingsGroup = section;
@@ -7536,8 +7976,8 @@ function flashSaved(entry) {
   entry.pillTimer = setTimeout(() => { pill.classList.remove('on'); }, 1500);
 }
 
-function startGroup(pane, { id, title, collapsible = false }) {
-  const g = { id, title, items: [], collapsible, open: false };
+function startGroup(pane, { id, title, collapsible = false, desc = '', glyph = null, section: navSection = '' }) {
+  const g = { id, title, items: [], collapsible, open: false, glyph, navSection };
   const section = el('section', 'settings-group');
   const head = collapsible ? el('button', 'group-head group-toggle') : el('div', 'group-head');
   if (collapsible) {
@@ -7546,7 +7986,11 @@ function startGroup(pane, { id, title, collapsible = false }) {
     head.append(chev);
     head.onclick = () => setGroupOpen(g, !g.open);
   }
-  head.append(el('span', 'group-title', title));
+  const text = el('div', 'group-head-text');
+  text.append(el('span', 'group-title', title));
+  // One sentence on what this page is for: the first thing a newcomer reads.
+  if (desc) text.append(el('span', 'group-desc', desc));
+  head.append(text);
   section.append(head);
   pane.append(section);
   g.el = section;
@@ -7815,6 +8259,23 @@ function listBlock(group, kind) {
         row.append(main);
         // Tag sits after the text at a fixed width, so names line up in both lists.
         if (kind === 'memory') row.append(el('span', 'tag', item.type || 'project'));
+        if (kind === 'skill' && item.builtin) {
+          row.append(el('span', `tag ${item.builtin === 'edited' ? 'tag-warn' : ''}`, item.builtin === 'edited' ? 'Edited' : 'Built-in'));
+          if (item.builtin === 'edited') {
+            const restore = el('button', 'btn', 'Restore');
+            restore.type = 'button';
+            restore.title = 'Replace your edited copy with the version that ships with Skadi';
+            restore.onclick = guard(async (event) => {
+              event.stopPropagation();
+              const ok = await askConfirm(`Replace your edited "${item.name}" skill with the built-in version? Your changes to it will be lost.`, { title: 'Restore built-in skill', ok: 'Restore' });
+              if (!ok) return;
+              await api('skill/restore', { name: item.name });
+              toast(`"${item.name}" is back to the built-in version.`);
+              renderSettingsPane();
+            });
+            row.append(restore);
+          }
+        }
         row.onclick = () =>
           (kind === 'memory' ? openMemory(item.name) : openSkill(item.name)).catch((err) => addMessage('error', err.message));
         list.append(row);
@@ -7944,8 +8405,18 @@ function renderDangerZone(pane) {
 function renderSettingsNav() {
   const nav = $('settingsNav');
   nav.replaceChildren();
+  let lastSection = null;
   for (const g of settingsGroups) {
-    const b = el('button', g.id === 'danger' ? 'danger' : null, g.id === 'danger' ? 'Danger zone' : g.title);
+    const navSection = g.id === 'danger' ? 'System' : g.navSection || '';
+    if (navSection && navSection !== lastSection) {
+      nav.append(el('span', 'settings-nav-section', navSection));
+      lastSection = navSection;
+    }
+    const b = el('button', g.id === 'danger' ? 'danger' : null);
+    b.type = 'button';
+    const glyph = icon(g.id === 'danger' ? 'warn' : g.glyph || 'sliders');
+    glyph.setAttribute('aria-hidden', 'true');
+    b.append(glyph, el('span', null, g.id === 'danger' ? 'Danger zone' : g.title));
     b.onclick = () => {
       if (g.collapsible) setGroupOpen(g, true);
       $('settingsSearch').value = '';
@@ -8014,6 +8485,26 @@ function jumpToNextMatch() {
   if (focusable && focusable !== $('settingsSearch')) focusable.focus({ preventScroll: true });
 }
 
+/** One plain sentence for the SearXNG status row. */
+function searchStatusText() {
+  const status = state.searchStatus || { state: 'off' };
+  switch (status.state) {
+    case 'installing': return `Setting up: ${status.step || 'working…'} Searches use DuckDuckGo meanwhile.`;
+    case 'starting': return 'Starting SearXNG… Searches use DuckDuckGo until it answers.';
+    case 'ready': return `Running privately at ${status.url}. The agent's web searches go through it.`;
+    case 'error': return status.error || 'SearXNG could not start. Searches use DuckDuckGo.';
+    default: return status.installed
+      ? 'Installed and switched off. Searches use DuckDuckGo.'
+      : 'Not installed. Turn on "Private search" above to set it up.';
+  }
+}
+
+function refreshSearchRows() {
+  for (const row of settingsRows) {
+    if (row.spec.searchStatus) row.refs.rerender?.();
+  }
+}
+
 function renderSettingsPane() {
   const pane = $('settingsPane');
   pane.replaceChildren(settingsNoMatch);
@@ -8021,7 +8512,7 @@ function renderSettingsPane() {
   settingsGroups = [];
 
   // ---- Appearance -------------------------------------------------------------
-  const appearance = startGroup(pane, { id: 'appearance', title: 'Appearance' });
+  const appearance = startGroup(pane, { id: 'appearance', title: 'Appearance', glyph: 'eye', section: 'General', desc: 'How Skadi looks.' });
   addRow(appearance, {
     key: 'theme',
     type: 'toggle',
@@ -8040,7 +8531,7 @@ function renderSettingsPane() {
   });
 
   // ---- Updates ---------------------------------------------------------------
-  const updates = startGroup(pane, { id: 'updates', title: 'Updates' });
+  const updates = startGroup(pane, { id: 'updates', title: 'Updates', glyph: 'download', section: 'General', desc: 'Your version, and whether Skadi looks for new releases.' });
   update.row = addRow(updates, {
     type: 'action',
     icon: 'download',
@@ -8079,7 +8570,7 @@ function renderSettingsPane() {
   });
 
   // ---- Model & provider ------------------------------------------------------
-  const model = startGroup(pane, { id: 'model', title: 'Model & provider' });
+  const model = startGroup(pane, { id: 'model', title: 'Model & provider', glyph: 'chip', section: 'Model', desc: 'Which AI answers new chats, where it runs, and how requests are retried.' });
   addRow(model, {
     type: 'text',
     mono: true,
@@ -8255,7 +8746,10 @@ function renderSettingsPane() {
   // ---- Fitting -----------------------------------------------------------------
   const fit = startGroup(pane, {
     id: 'fit',
-    title: 'VRAM fitting',
+    title: 'Local GPU (VRAM)',
+    glyph: 'peak',
+    section: 'Model',
+    desc: 'How a local model is fitted onto your graphics card so it never spills into slow system memory.',
   });
   addRow(fit, {
     key: 'autoFitOnStart',
@@ -8322,7 +8816,7 @@ function renderSettingsPane() {
   });
 
   // ---- Agent -------------------------------------------------------------------
-  const agent = startGroup(pane, { id: 'agent', title: 'Agent' });
+  const agent = startGroup(pane, { id: 'agent', title: 'Permissions & safety', glyph: 'lock', section: 'Agent', desc: 'What the agent may do without asking you, and when a long job is paused.' });
   addRow(agent, {
     key: 'permissionMode',
     type: 'select',
@@ -8346,47 +8840,70 @@ function renderSettingsPane() {
     desc: 'Ask before the agent runs a command.',
   });
   addRow(agent, {
+    key: 'commandTimeoutSec',
+    type: 'number',
+    icon: 'stop',
+    label: 'Command timeout',
+    desc: 'Seconds before a single shell command is stopped.',
+  });
+  addRow(agent, {
+    key: 'maxTurnMinutes',
+    type: 'number',
+    icon: 'stop',
+    label: 'Turn safety limit',
+    desc: 'Minutes before a long job pauses. Its progress is saved, so "continue" picks it up. 0 turns the limit off.',
+  });
+
+  const helpers = startGroup(pane, { id: 'helpers', title: 'Agent helpers', glyph: 'agents', section: 'Agent', desc: 'Extra help that keeps the model on track. With small local models, fewer helpers can be faster.' });
+  addRow(helpers, {
     key: 'autoSubagents',
     type: 'toggle',
     icon: 'chip',
-    label: 'Automatic research subagents',
-    desc: 'Automatically delegate bounded search, inspection, and summary work to a focused read-only child.',
+    label: 'Research helper',
+    desc: 'Before a turn, a read-only helper may do the searching and summarising, so the main agent starts with the facts.',
   });
-  addRow(agent, {
+  addRow(helpers, {
     key: 'autoSubagentReasoning',
     type: 'select',
     icon: 'chip',
-    label: 'Subagent reasoning',
-    desc: 'Default effort for automatically delegated work. None is fastest for routine research.',
+    label: 'Research helper thinking',
+    desc: 'How much the helper thinks. None is fastest and enough for finding and summarising.',
     options: [['none', 'None'], ['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high']],
   });
-  addRow(agent, {
+  addRow(helpers, {
     key: 'loopDetection',
     type: 'toggle',
     icon: 'restart',
-    label: 'Semantic loop detection',
-    desc: 'A lightweight supervisor detects non-progress, removes the bad step from active context, and redirects the agent.',
+    label: 'Progress check (advisor)',
+    desc: 'Catches the agent repeating itself. Exact repeats are always caught; every few steps the model is also asked whether its last step added anything. It only ever adds a one-line hint.',
   });
-  addRow(agent, {
+  addRow(helpers, {
+    key: 'planning',
+    type: 'toggle',
+    icon: 'list',
+    label: 'Plan checklist',
+    desc: 'Lets the agent keep a short step list for bigger tasks, shown in the Plan tab. Turn off if a small model spends too many steps on bookkeeping. Applies to new chats.',
+  });
+  addRow(helpers, {
     key: 'loopReviewEffort',
     type: 'select',
     icon: 'chip',
-    label: 'Loop supervisor reasoning',
-    desc: 'Reasoning used by the progress supervisor. None is fastest and is usually enough.',
+    label: 'Progress check thinking',
+    desc: 'How much the model thinks before answering the progress check. None is fastest and works best on small local models.',
     options: [['none', 'None'], ['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high']],
   });
-  addRow(agent, {
+  addRow(helpers, {
     key: 'loopReviewEvery',
     type: 'range',
     min: 1,
     max: 10,
     step: 1,
-    fmt: (v) => `every ${v} round${Number(v) === 1 ? '' : 's'}`,
+    fmt: (v) => `every ${v} step${Number(v) === 1 ? '' : 's'}`,
     icon: 'restart',
-    label: 'Semantic review cadence',
-    desc: 'Exact repeats are caught immediately. The slower model-based reviewer runs at this interval.',
+    label: 'Progress check every',
+    desc: 'How often the model-based check runs. Each check costs one short model call; steps that edited or tested something are never checked.',
   });
-  addRow(agent, {
+  addRow(helpers, {
     key: 'maxImplementationDiscoveryRounds',
     type: 'range',
     min: 1,
@@ -8394,10 +8911,10 @@ function renderSettingsPane() {
     step: 1,
     fmt: (v) => String(v),
     icon: 'search',
-    label: 'Discovery budget',
-    desc: 'Base research rounds before an implementation request must start changing the deliverable.',
+    label: 'Search steps before editing',
+    desc: 'On a change request, how many steps the agent may spend looking before it is asked to start editing. Bigger tasks get more.',
   });
-  addRow(agent, {
+  addRow(helpers, {
     key: 'maxToolRounds',
     type: 'range',
     min: 0,
@@ -8405,62 +8922,77 @@ function renderSettingsPane() {
     step: 1,
     fmt: (v) => (Number(v) === 0 ? 'off' : String(v)),
     icon: 'restart',
-    label: 'Easy-task tool ceiling',
-    desc: 'Skadi classifies each request. Medium tasks receive 2x and hard tasks 3.75x, with a small verification reserve after the first edit.',
+    label: 'Step limit per turn',
+    desc: 'An emergency stop for a runaway turn, in tool steps for a small task (bigger tasks get 2-4x). Off by default: the progress check and time limit do the job.',
   });
-  addRow(agent, {
-    key: 'commandTimeoutSec',
-    type: 'number',
-    icon: 'stop',
-    label: 'Command timeout',
-    desc: 'Seconds before a single shell command is killed.',
-  });
-  addRow(agent, {
-    key: 'maxTurnMinutes',
-    type: 'number',
-    icon: 'stop',
-    label: 'Turn safety limit',
-    desc: 'Minutes before a long autonomous turn pauses with resumable progress. Set 0 to disable.',
-  });
-  addRow(agent, {
-    key: 'webSearchProvider',
-    type: 'select',
-    icon: 'globe',
-    label: 'Web search',
-    desc: 'DuckDuckGo works without setup. SearXNG uses your own instance.',
-    options: [['duckduckgo', 'DuckDuckGo'], ['searxng', 'SearXNG']],
-  });
-  addRow(agent, {
-    key: 'searxngUrl',
-    type: 'text',
-    icon: 'globe',
-    label: 'SearXNG URL',
-    desc: 'Base URL of your SearXNG instance, for example http://localhost:8080.',
-  });
-  addRow(agent, {
+  // ---- Web search ------------------------------------------------------------
+  const search = startGroup(pane, { id: 'search', title: 'Web search', glyph: 'globe', section: 'Agent', desc: 'How the agent searches the web. DuckDuckGo works with no setup; SearXNG is a private search engine that runs on this computer.' });
+  addRow(search, {
     key: 'searxngAutoStart',
     type: 'toggle',
     icon: 'globe',
-    label: 'Run SearXNG with Skadi',
-    desc: 'Start and use a private local SearXNG container with Docker when Skadi runs. The first run downloads the image.',
+    label: 'Private search with SearXNG',
+    desc: 'Runs SearXNG on this computer, no Docker needed. The first time, Skadi installs it by itself (needs Python 3.10 or newer, takes a few minutes). Until it is ready, searches use DuckDuckGo.',
+    save: async (v) => {
+      state.settings = await api('settings', settingPatch('searxngAutoStart', v));
+      state.searchStatus = { ...(state.searchStatus || {}), state: v ? 'starting' : 'off' };
+      for (const row of settingsRows) if (row.spec.key === 'searxngAutoStart') updateEntry(row);
+      refreshSearchRows();
+    },
   });
-  addRow(agent, {
-    key: 'searxngPort',
-    type: 'number',
+  addRow(search, {
+    type: 'action',
     icon: 'globe',
-    label: 'Local SearXNG port',
-    desc: 'Port for the bundled SearXNG service. Defaults to 8888.',
+    label: 'Status',
+    searchStatus: true,
+    desc: () => searchStatusText(),
+    render: (wrap, entry) => {
+      wrap.replaceChildren();
+      const status = state.searchStatus || { state: 'off' };
+      const badge = el('span', `status-badge ${status.state}`, ({ off: 'Off', installing: 'Installing', starting: 'Starting', ready: 'Running', error: 'Problem' })[status.state] || status.state);
+      wrap.append(badge);
+      if (status.installed || status.state === 'error') {
+        const reinstall = el('button', 'btn', 'Reinstall');
+        reinstall.type = 'button';
+        reinstall.title = 'Delete the local SearXNG and set it up again from scratch';
+        reinstall.disabled = status.state === 'installing';
+        reinstall.onclick = guard(async () => {
+          const ok = await askConfirm('Delete the local SearXNG and install it again? This takes a few minutes.', { title: 'Reinstall SearXNG', ok: 'Reinstall', danger: false });
+          if (ok) await api('search/searxng/reinstall', {});
+        });
+        wrap.append(reinstall);
+      }
+      entry.refs.descEl.textContent = searchStatusText();
+    },
   });
-  addRow(agent, {
+  addRow(search, {
     key: 'webSearchResults',
     type: 'number',
     icon: 'globe',
-    label: 'Search results',
-    desc: 'Default number returned to the agent (1–10).',
+    label: 'Results per search',
+    desc: 'How many results the agent gets back each time (1-10).',
+  });
+  addRow(search, {
+    key: 'searxngPort',
+    type: 'number',
+    icon: 'globe',
+    label: 'SearXNG port',
+    desc: 'Where the private SearXNG listens on this computer. Change it only if 8888 is taken.',
+  });
+  addRow(search, {
+    key: 'searxngUrl',
+    type: 'text',
+    icon: 'globe',
+    label: 'Your own SearXNG server',
+    desc: 'Only if you already run SearXNG somewhere else, e.g. http://192.168.1.5:8080. Used when private search above is off.',
+    save: async (v) => {
+      state.settings = await api('settings', { ...settingPatch('searxngUrl', v), webSearchProvider: v.trim() ? 'searxng' : 'duckduckgo' });
+      for (const row of settingsRows) if (row.spec.key === 'searxngUrl') updateEntry(row);
+    },
   });
 
   // ---- Memory --------------------------------------------------------------------
-  const memory = startGroup(pane, { id: 'memory', title: 'Memory' });
+  const memory = startGroup(pane, { id: 'memory', title: 'Memory', glyph: 'file', section: 'Knowledge', desc: 'Facts the agent keeps between chats: who you are, how you like to work, what a project needs.' });
   addRow(memory, {
     key: 'memoryInPrompt',
     type: 'toggle',
@@ -8487,18 +9019,25 @@ function renderSettingsPane() {
   listBlock(memory, 'memory');
 
   // ---- Skills --------------------------------------------------------------------
-  const skills = startGroup(pane, { id: 'skills', title: 'Skills' });
+  const skills = startGroup(pane, { id: 'skills', title: 'Skills', glyph: 'checklist', section: 'Knowledge', desc: 'Step-by-step guides the agent follows for particular jobs, such as pixel art, web research or checking a page in the browser.' });
+  addRow(skills, {
+    key: 'autoSkills',
+    type: 'toggle',
+    icon: 'bolt',
+    label: 'Load matching skills automatically',
+    desc: 'When a request clearly matches a skill (say, "pixel art"), its quick start is given to the model straight away. Small models often forget to load skills themselves.',
+  });
   addRow(skills, {
     key: 'skillsInPrompt',
     type: 'toggle',
     icon: 'check',
-    label: 'Skills catalogue in prompt',
-    desc: 'Names and descriptions; bodies load on demand. Off hides skills until named.',
+    label: 'List skills in the prompt',
+    desc: 'The model sees each skill\'s name and one-line description, and can load the rest when needed.',
   });
   listBlock(skills, 'skill');
 
   // ---- Advanced (collapsed by default) -------------------------------------------
-  const adv = startGroup(pane, { id: 'advanced', title: 'Advanced', collapsible: true });
+  const adv = startGroup(pane, { id: 'advanced', title: 'Advanced', collapsible: true, glyph: 'gear', section: 'System', desc: 'Context compaction, the review browser and the agent workspace. The defaults suit most setups.' });
   setGroupOpen(adv, advancedOpen);
   const C = 'compaction';
   addRow(adv, { key: `${C}.auto`, type: 'toggle', icon: 'archive', label: 'Auto-compact context', desc: 'Summarise older turns once context grows past the threshold.' });
@@ -8576,6 +9115,25 @@ function wireShell() {
     e.preventDefault();
     window.skadiWindow.drag();
   });
+
+  // The shell gives the caption's height back to the page, top border and all,
+  // so Windows offers no resize along the top. A thin strip there hands the
+  // press back as a native top (or corner) resize. An older Skadi.exe has no
+  // resize command, and then the strip is left out.
+  if (typeof window.skadiWindow.resize === 'function') {
+    const edge = el('div', 'shell-resize');
+    edge.setAttribute('aria-hidden', 'true');
+    for (const [side, name] of [['top', 'top'], ['left', 'topleft'], ['right', 'topright']]) {
+      const grip = el('div', `shell-resize-${side}`);
+      grip.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        window.skadiWindow.resize(name);
+      });
+      edge.append(grip);
+    }
+    document.body.append(edge);
+  }
 }
 
 // The host toggles `is-maximized` on <html>; keep the glyph in step with it.

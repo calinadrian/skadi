@@ -14,22 +14,101 @@
 // cost thousands of prompt tokens on every single turn.
 import { readFile, readdir, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join, sep, dirname, basename } from 'node:path';
-import { cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
-/** Install starter skills one package at a time. Existing user skills always
- * win; this only makes newly bundled starters available after an app update. */
+// Which bundled skill text each installed copy started from. A copy whose
+// text still matches has never been edited, so an app update may replace it;
+// one that differs is the user's and is never touched automatically.
+const MANIFEST = '.bundled.json';
+const hashOf = (file) => (existsSync(file) ? createHash('sha256').update(readFileSync(file)).digest('hex') : null);
+const readManifest = (skillsDir) => {
+  try { return JSON.parse(readFileSync(join(skillsDir, MANIFEST), 'utf8')); } catch { return {}; }
+};
+
+/**
+ * Install starter skills, and keep unedited ones current. New bundled skills
+ * are copied in; a bundled skill the user never edited is replaced when the
+ * app ships a newer version; an edited one is left exactly as it is.
+ * Returns the names added or updated.
+ */
 export function seedBundledSkills(defaultsDir, skillsDir) {
   if (!existsSync(defaultsDir)) return [];
   mkdirSync(skillsDir, { recursive: true });
-  const added = [];
+  const manifest = readManifest(skillsDir);
+  const changed = [];
   for (const entry of readdirSync(defaultsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
     const source = join(defaultsDir, entry.name);
     const target = join(skillsDir, entry.name);
-    if (existsSync(target)) continue;
-    cpSync(source, target, { recursive: entry.isDirectory(), errorOnExist: true });
-    added.push(entry.name);
+    const bundled = hashOf(join(source, 'SKILL.md'));
+    if (!existsSync(target)) {
+      cpSync(source, target, { recursive: true, errorOnExist: true });
+      manifest[entry.name] = bundled;
+      changed.push(entry.name);
+      continue;
+    }
+    const installed = hashOf(join(target, 'SKILL.md'));
+    if (installed === bundled) {
+      manifest[entry.name] = bundled;
+    } else if (manifest[entry.name] && installed === manifest[entry.name]) {
+      cpSync(source, target, { recursive: true, force: true });
+      manifest[entry.name] = bundled;
+      changed.push(entry.name);
+    }
   }
-  return added.sort();
+  try { writeFileSync(join(skillsDir, MANIFEST), JSON.stringify(manifest, null, 2)); } catch { /* read-only install */ }
+  return changed.sort();
+}
+
+/** Per bundled skill: 'current', 'edited' (differs from the built-in), or 'missing'. */
+export function bundledSkillStatus(defaultsDir, skillsDir) {
+  if (!existsSync(defaultsDir)) return {};
+  const out = {};
+  for (const entry of readdirSync(defaultsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const installed = hashOf(join(skillsDir, entry.name, 'SKILL.md'));
+    out[entry.name] = !installed ? 'missing' : installed === hashOf(join(defaultsDir, entry.name, 'SKILL.md')) ? 'current' : 'edited';
+  }
+  return out;
+}
+
+/** Put one bundled skill back to the version that ships with the app. */
+export function restoreBundledSkill(defaultsDir, skillsDir, name) {
+  const id = skillSlug(name);
+  const source = join(defaultsDir, id);
+  if (!id || !existsSync(join(source, 'SKILL.md'))) throw new Error(`"${name}" is not a built-in skill`);
+  const target = join(skillsDir, id);
+  rmSync(target, { recursive: true, force: true });
+  cpSync(source, target, { recursive: true });
+  const manifest = readManifest(skillsDir);
+  manifest[id] = hashOf(join(source, 'SKILL.md'));
+  writeFileSync(join(skillsDir, MANIFEST), JSON.stringify(manifest, null, 2));
+  return id;
+}
+
+/** The "## Quick start" section of a skill body, if it has one. */
+export function quickStart(body) {
+  const text = String(body || '');
+  const start = /^##\s+Quick start\s*$/im.exec(text);
+  if (!start) return '';
+  const rest = text.slice(start.index + start[0].length);
+  const end = /^##\s/m.exec(rest);
+  return (end ? rest.slice(0, end.index) : rest).trim();
+}
+
+/**
+ * Skills whose `triggers` pattern matches the request. Small models often
+ * skip load_skill even when the catalogue names the right skill, so these are
+ * handed to them directly.
+ */
+export function autoSkills(skills, text) {
+  const request = String(text || '');
+  if (!request.trim()) return [];
+  return skills.filter((skill) => {
+    if (!skill.triggers) return false;
+    try { return new RegExp(`\\b(?:${skill.triggers})\\b`, 'i').test(request); } catch { return false; }
+  });
 }
 
 /** Directory-safe identifier. Skill names become directory names, so unlike a
@@ -84,6 +163,7 @@ export class SkillStore {
       out.push({
         name,
         description: meta.description || '(no description)',
+        triggers: typeof meta.triggers === 'string' ? meta.triggers : '',
         file,
         bytes: body.length,
       });
@@ -108,12 +188,18 @@ export class SkillStore {
     return { ...hit, body: portableBody };
   }
 
-  async save(name, description, body) {
+  async save(name, description, body, triggers) {
     const id = skillSlug(name);
     if (!id) throw new Error('skill needs a name');
     const dir = join(this.dir, id);
     await mkdir(dir, { recursive: true });
-    const text = `---\nname: ${id}\ndescription: ${oneLine(description)}\n---\n\n${String(body || '').trim()}\n`;
+    // Editing a skill in the UI must not silently drop its auto-load pattern.
+    let pattern = triggers;
+    if (pattern === undefined && existsSync(join(dir, 'SKILL.md'))) {
+      pattern = parseFrontMatter(await readFile(join(dir, 'SKILL.md'), 'utf8')).meta.triggers;
+    }
+    const triggerLine = typeof pattern === 'string' && pattern.trim() ? `triggers: ${oneLine(pattern, 500)}\n` : '';
+    const text = `---\nname: ${id}\ndescription: ${oneLine(description)}\n${triggerLine}---\n\n${String(body || '').trim()}\n`;
     await writeFile(join(dir, 'SKILL.md'), text, 'utf8');
     return { name: id, description: oneLine(description) };
   }

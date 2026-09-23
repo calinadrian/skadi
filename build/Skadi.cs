@@ -8,7 +8,8 @@
 // client rectangle's top back where it was. That strips the title bar while
 // leaving the left, right and bottom borders as non-client area, so native
 // resizing, Aero Snap, the drop shadow and the maximise animation all keep
-// working. Dragging is a real WM_NCLBUTTONDOWN, not a mouse-move loop, so snap
+// working. The top edge is client area now, so the page reports a press on its
+// top few pixels and the shell starts the same native resize from there. Dragging is a real WM_NCLBUTTONDOWN, not a mouse-move loop, so snap
 // layouts behave exactly as they do for any other window.
 //
 // If WebView2 is unavailable the shell falls back to a Chromium --app window,
@@ -33,6 +34,9 @@ static class Native
     public const int WM_NCCALCSIZE = 0x0083;
     public const int WM_NCLBUTTONDOWN = 0x00A1;
     public const int HTCAPTION = 2;
+    public const int HTTOP = 12;
+    public const int HTTOPLEFT = 13;
+    public const int HTTOPRIGHT = 14;
 
     [DllImport("user32.dll")] public static extern bool ReleaseCapture();
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -154,7 +158,8 @@ class ShellForm : Form
             "  minimize: () => window.chrome.webview.postMessage('minimize')," +
             "  toggleMaximize: () => window.chrome.webview.postMessage('maximize')," +
             "  close: () => window.chrome.webview.postMessage('close')," +
-            "  drag: () => window.chrome.webview.postMessage('drag')" +
+            "  drag: () => window.chrome.webview.postMessage('drag')," +
+            "  resize: (edge) => window.chrome.webview.postMessage('resize:' + edge)" +
             "};");
 
         core.Navigate(url);
@@ -182,7 +187,29 @@ class ShellForm : Form
                 Native.ReleaseCapture();
                 Native.SendMessage(Handle, Native.WM_NCLBUTTONDOWN, (IntPtr)Native.HTCAPTION, IntPtr.Zero);
                 break;
+            case "resize:top":
+                BeginTopResize(Native.HTTOP);
+                break;
+            case "resize:topleft":
+                BeginTopResize(Native.HTTOPLEFT);
+                break;
+            case "resize:topright":
+                BeginTopResize(Native.HTTOPRIGHT);
+                break;
         }
+    }
+
+    // The top border was handed to the client area (see WndProc), so the page
+    // reports a press on its top edge and Windows runs its own sizing loop.
+    // The sizing loop measures from the press point, so pass the real cursor
+    // position rather than zero or the window would jump.
+    void BeginTopResize(int hit)
+    {
+        if (WindowState != FormWindowState.Normal) return;
+        Point p = Cursor.Position;
+        IntPtr pos = (IntPtr)((p.Y << 16) | (p.X & 0xFFFF));
+        Native.ReleaseCapture();
+        Native.SendMessage(Handle, Native.WM_NCLBUTTONDOWN, (IntPtr)hit, pos);
     }
 
     void SyncMaximizeState()

@@ -10,7 +10,7 @@ export const CONFIG_PATH = join(ROOT, 'config', 'profiles.json');
 export const SETTINGS_PATH = join(ROOT, 'config', 'settings.json');
 
 export const DEFAULT_SETTINGS = {
-  settingsSchemaVersion: 1,
+  settingsSchemaVersion: 2,
   // Directory the agent's file tools are confined to. Changed from the UI.
   workspace: join(ROOT, 'workspace'),
   uiPort: 7777,
@@ -35,8 +35,15 @@ export const DEFAULT_SETTINGS = {
   // while the model reviewer samples every N rounds.
   loopReviewEvery: 3,
   loopDetection: true,
-  // The supervisor is a classification task, so thinking is off by default.
-  loopReviewEffort: 'low',
+  // The supervisor is a yes/no classification, so thinking is off by default:
+  // on a local model a thinking trace costs more than the answer is worth.
+  loopReviewEffort: 'none',
+  // Offer the update_plan checklist tool and show the Plan pane. Off keeps
+  // small models from spending steps on bookkeeping.
+  planning: true,
+  // Hand a skill straight to the model when the request matches its
+  // triggers (e.g. pixel art), instead of hoping it calls load_skill.
+  autoSkills: true,
   // A single autonomous turn should not occupy a local model indefinitely.
   // The transcript and file changes are saved, so this limit is resumable.
   maxTurnMinutes: 45,
@@ -304,12 +311,15 @@ export function loadSettings() {
 /** Migrate settings that were once shipped as defaults without overriding
  * later, explicit choices. Version 0 used an 8-round easy-task limit, which
  * became 30 rounds for hard tasks and paused valid work despite semantic loop
- * detection. The replacement default is opt-out by time/semantics, not count. */
+ * detection. The replacement default is opt-out by time/semantics, not count.
+ * Version 1 shipped the progress check with 'low' reasoning; on a local model
+ * that trace ate the reviewer's whole answer budget, so it moves to 'none'. */
 export function migrateSettings(saved = {}) {
   const next = { ...saved };
   const version = Number(next.settingsSchemaVersion) || 0;
   if (version < 1 && Number(next.maxToolRounds) === 8) next.maxToolRounds = 0;
-  next.settingsSchemaVersion = 1;
+  if (version < 2 && next.loopReviewEffort === 'low') next.loopReviewEffort = 'none';
+  next.settingsSchemaVersion = 2;
   return next;
 }
 

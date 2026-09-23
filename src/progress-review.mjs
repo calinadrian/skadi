@@ -23,24 +23,29 @@ export function progressReviewInput(messages, roundStart, ledger = '') {
   return { request: clip(textOf(firstUser?.content), 2400), prior: render(prior), current: render(current), ledger: clip(ledger, 2400) };
 }
 
+// Written for the same small local model that does the work: one yes/no
+// question, the evidence it needs, and a default of "no". A false "yes" costs
+// the agent a detour, so only a clear repeat or a clear wrong turn counts.
 export function progressReviewPrompt(input) {
-  return `You are a strict progress supervisor for a coding agent. Judge the latest completed tool action semantically against the original request.
+  return `You check whether a coding agent's latest step was useful. Answer semantically, from the evidence below.
 
-Mark "loop" true only when the latest action made no new useful progress because it repeats already-known evidence, explores an unrelated branch, retries a failed approach without adapting, or investigates after the direct fix/test is already clear. A failed decisive test can still be progress. Be conservative: do not punish necessary verification.
+Answer "loop": true ONLY if the latest step clearly added nothing: it fetched information the agent already had, retried a failed step without changing anything, or worked on something unrelated to the request. Reading a new file, editing, running a test, or checking a result is useful, even when it fails. If you are unsure, answer false.
 
-If loop is true, give one concrete next action that returns to the shortest path. Output JSON only:
-{"loop":false,"reason":"brief evidence-based reason","next":"single concrete next action"}
+If "loop" is true, "next" must be one short, concrete action that gets back on track (for example "edit src/app.js to fix the handler").
 
-ORIGINAL REQUEST:
+Reply with JSON only, no other text:
+{"loop":false,"reason":"short reason","next":""}
+
+USER REQUEST:
 ${input.request}
 
-RECENT PRIOR EVIDENCE:
+EARLIER STEPS:
 ${input.prior || '(none)'}
 
-LATEST ACTION:
+LATEST STEP:
 ${input.current}
 
-CURRENT PROGRESS LEDGER:
+PROGRESS SO FAR:
 ${input.ledger || '(none)'}`;
 }
 

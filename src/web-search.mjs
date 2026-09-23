@@ -111,18 +111,30 @@ export function buildWebSearchTools(ctx, fetcher = fetch) {
         const term = String(query ?? '').trim();
         if (!term) throw new ToolError('query is required');
         const limit = Math.min(MAX_RESULTS, Math.max(1, Number(max_results) || Number(ctx.settings.webSearchResults) || DEFAULT_RESULTS));
-        const provider = ctx.settings.searxngAutoStart || ctx.settings.webSearchProvider === 'searxng'
-          ? 'searxng'
-          : 'duckduckgo';
+        // The built-in SearXNG is used once it is actually up; while it is
+        // still installing or starting (or has failed), DuckDuckGo answers so
+        // a search never fails just because the switch was flipped.
+        const local = Boolean(ctx.settings.searxngAutoStart);
+        const localReady = local && (ctx.searxngStatus?.()?.state ?? 'ready') === 'ready';
+        const custom = !local && ctx.settings.webSearchProvider === 'searxng' && String(ctx.settings.searxngUrl || '').trim();
+        const provider = localReady || custom ? 'searxng' : 'duckduckgo';
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 15000);
         try {
-          const results = provider === 'searxng'
-            ? await requestSearxng(term, ctx.settings.searxngAutoStart
-              ? localSearxngUrl(ctx.settings)
-              : String(ctx.settings.searxngUrl || ''), fetcher, controller.signal)
-            : await requestDuckDuckGo(term, fetcher, controller.signal);
-          return formatResults(term, provider === 'searxng' ? 'SearXNG' : 'DuckDuckGo', results.slice(0, limit));
+          let results;
+          let label = provider === 'searxng' ? 'SearXNG' : 'DuckDuckGo';
+          if (provider === 'searxng') {
+            try {
+              results = await requestSearxng(term, localReady ? localSearxngUrl(ctx.settings) : String(ctx.settings.searxngUrl), fetcher, controller.signal);
+            } catch (error) {
+              if (error instanceof ToolError || controller.signal.aborted) throw error;
+              results = await requestDuckDuckGo(term, fetcher, controller.signal);
+              label = `DuckDuckGo (SearXNG failed: ${error.message})`;
+            }
+          } else {
+            results = await requestDuckDuckGo(term, fetcher, controller.signal);
+          }
+          return formatResults(term, label, results.slice(0, limit));
         } catch (error) {
           if (error instanceof ToolError) throw error;
           const reason = error?.name === 'AbortError' ? 'timed out after 15 seconds' : error?.message;

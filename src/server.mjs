@@ -21,7 +21,9 @@ import { LocalSearxng } from './searxng.mjs';
 import { listDirectory, readProjectFile, findFiles } from './files.mjs';
 import { TaskManager } from './tasks.mjs';
 import { gitStatus, gitDiff } from './git.mjs';
-import { SkillStore, skillTools, skillCatalogue, seedBundledSkills } from './skills.mjs';
+import { SkillStore, skillTools, skillCatalogue, seedBundledSkills, autoSkills, quickStart, bundledSkillStatus, restoreBundledSkill } from './skills.mjs';
+import { PixelStudio } from './pixelart.mjs';
+import { pixelTools, PIXEL_REQUEST } from './pixel-tools.mjs';
 import { MemoryStore, memoryTools } from './memory.mjs';
 import { SessionStore, redactCredentials } from './sessions.mjs';
 import { searchSession, contextDetails, turnReview, recordCommand } from './workflow.mjs';
@@ -304,6 +306,8 @@ export class Skadi {
     this.serverLogs = [];
     this.vram = new VramMonitor({ intervalMs: this.settings.vramPollMs });
     this.skills = new SkillStore(join(ROOT, 'skills'));
+    // Pixel art canvases, one file per chat, kept beside the chats.
+    this.pixelStudio = new PixelStudio(join(ROOT, 'pixel'));
     this.memory = new MemoryStore(join(ROOT, 'memory'));
     this.sessions = new SessionStore(join(ROOT, 'sessions'));
     this.clients = new Set();
@@ -1799,8 +1803,10 @@ export class Skadi {
   progressReviewer(provider, model) {
     return async ({ messages, roundStart, signal, ledger }) => {
       const input = progressReviewInput(messages, roundStart, ledger);
-      const effort = String(this.settings.loopReviewEffort || 'low').toLowerCase();
-      const sampling = { max_tokens: 220, temperature: 0 };
+      const effort = String(this.settings.loopReviewEffort || 'none').toLowerCase();
+      // A thinking trace shares the answer budget: 220 tokens of it left a
+      // thinking model with no room for the JSON, so every review failed open.
+      const sampling = { max_tokens: effort === 'none' ? 220 : 1600, temperature: 0 };
       if (provider.managed) {
         sampling.chat_template_kwargs = { enable_thinking: effort !== 'none', reasoning_effort: effort };
       } else if (effort && effort !== 'none') {
@@ -1840,7 +1846,7 @@ export class Skadi {
   } = {}) {
     const request = String(task || '').trim();
     if (!request) throw new Error('delegate_task requires a task');
-    const ctx = { workspace: this.workspace, settings: this.settings, tasks: this.tasks };
+    const ctx = { workspace: this.workspace, settings: this.settings, tasks: this.tasks, searxngStatus: () => this.webSearchStatus };
     const researchTools = Object.fromEntries(Object.entries({
       ...buildTools(ctx),
       ...(webSearch ? buildWebSearchTools(ctx) : {}),
@@ -1884,16 +1890,21 @@ export class Skadi {
     }
   }
 
-  async makeAgent(provider, model, { webSearch = true, subagents = true } = {}) {
+  async makeAgent(provider, model, { webSearch = true, subagents = true, pixel = false } = {}) {
     const ctx = {
       workspace: this.workspace,
       settings: this.settings,
       tasks: this.tasks,
+      searxngStatus: () => this.webSearchStatus,
       // Evaluated when a background task actually starts, by which point the
       // turn has stamped its session id onto ctx (see chat below).
       startBackground: ({ command, shell }) =>
         this.tasks.start({ command, shell, sessionId: ctx.sessionId ?? null, cwd: this.workspace }),
-      updatePlan: (request) => this.updateSessionPlan(ctx.sessionId, request, { source: 'agent' }),
+      // Planning can be switched off in Settings; without the callback the
+      // update_plan tool is never offered.
+      ...(this.settings.planning !== false
+        ? { updatePlan: (request) => this.updateSessionPlan(ctx.sessionId, request, { source: 'agent' }) }
+        : {}),
     };
     // Filled in once the agent exists: the screenshot hook belongs to *this*
     // turn's agent, not to whichever turn happens to be running.
@@ -1903,6 +1914,18 @@ export class Skadi {
       ...(webSearch ? buildWebSearchTools(ctx) : {}),
       ...skillTools(this.skills),
       ...memoryTools(this.memory),
+      // Pixel art tools ride only on turns about pixel art: five more schemas
+      // on every request would crowd a small model's context for nothing.
+      ...(pixel ? pixelTools(this.pixelStudio, ctx, {
+        onChange: ({ sessionId, name, canvas, looked }) => {
+          const scale = Math.max(1, Math.min(12, Math.floor(256 / Math.max(canvas.w, canvas.h))));
+          const png = canvas.png(scale);
+          this.broadcast('pixel_canvas', { sessionId, name, width: canvas.w, height: canvas.h, src: `data:image/png;base64,${png.toString('base64')}` });
+          // A model that can see gets the rendered picture after it looks,
+          // on top of the text grid every model receives.
+          if (looked) self?.offerImage({ mediaType: 'image/png', data: png.toString('base64'), label: `Canvas "${name}" (${canvas.w}x${canvas.h}) rendered at ${scale}x.` });
+        },
+      }) : {}),
       ...(subagents ? { delegate_task: {
         schema: {
           description: 'Delegate one bounded read-only research, search, inspection, or summary task to a focused subagent. Use this before broad exploration. The subagent returns evidence only; the parent remains responsible for edits and final verification.',
@@ -1982,8 +2005,13 @@ export class Skadi {
     agent.toolCtx = ctx;
     agent.liveGuidance = () => {
       const session = this.liveSession(ctx.sessionId);
-      return [planPrompt(session?.plan), session?.requirements ? `Pinned requirements from the user:\n${session.requirements}` : ''].filter(Boolean).join('\n\n');
+      return [
+        ctx.updatePlan ? planPrompt(session?.plan) : '',
+        session?.requirements ? `## Pinned requirements from the user\n${session.requirements}` : '',
+      ].filter(Boolean).join('\n\n');
     };
+    // Whether a plan exists decides if a big task is nudged to write one.
+    agent.livePlan = ctx.updatePlan ? () => this.liveSession(ctx.sessionId)?.plan ?? null : null;
     agent.liveLedger = () => {
       const session = this.liveSession(ctx.sessionId);
       return { override: session?.ledger, snapshot: session?.ledgerState };
@@ -2144,6 +2172,8 @@ export class Skadi {
           model,
           browser: true,
           permissionMode: this.settings.permissionMode || 'default',
+          planning: this.settings.planning !== false,
+          subagents: session.subagents !== false,
         }),
       });
     }
@@ -2162,6 +2192,31 @@ export class Skadi {
       : opts.subagents !== false;
     if (systemMessage) session.messages.push({ role: 'system', content: systemMessage });
     else this.appendUserMessage(session, text, uploads, provider);
+
+    // Skills whose triggers match the request are handed over directly: a
+    // small model often skips load_skill even with the right skill listed.
+    // Each is injected once per chat, as its Quick start where it has one.
+    if (!systemMessage && this.skills && this.settings.autoSkills !== false) {
+      session.autoSkills ??= [];
+      for (const skill of autoSkills(await this.skills.list(), text)) {
+        if (session.autoSkills.includes(skill.name)) continue;
+        try {
+          const { body } = await this.skills.load(skill.name);
+          const brief = quickStart(body) || (body.length <= 6000 ? body : '');
+          session.messages.push({
+            role: 'system',
+            content: `[Skill "${skill.name}" loaded automatically because this request matches it. Follow it.]
+
+${brief || skill.description}
+
+Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
+          });
+          session.autoSkills.push(skill.name);
+        } catch (err) {
+          console.error('[skills] auto-load failed:', err.message);
+        }
+      }
+    }
 
     const workTurn = { id: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       name: redactCredentials(text || systemMessage || 'Continue task').slice(0, 100), startedAt: Date.now(), status: 'running', commands: [] };
@@ -2209,7 +2264,12 @@ export class Skadi {
       this.broadcast('agent_subagent', { sessionId: session.id, state: 'failed', error: err.message });
     }
 
-    const agent = await this.makeAgent(provider, model, { webSearch: session.webSearch, subagents: session.subagents });
+    // Pixel tools for this turn: the request (or an earlier one in this chat)
+    // is about pixel art, or the chat already has canvases to keep working on.
+    const pixel = PIXEL_REQUEST.test(text || '')
+      || (session.messages || []).some((m) => m.role === 'user' && PIXEL_REQUEST.test(typeof m.content === 'string' ? m.content : ''))
+      || Boolean(await this.pixelStudio?.has(session.id));
+    const agent = await this.makeAgent(provider, model, { webSearch: session.webSearch, subagents: session.subagents, pixel });
     // Per-turn tool context: background tasks tag this session, and file
     // edits push undo snapshots here (capped; before-images clipped). They
     // ride along in the session file so Undo survives a restart.
@@ -2410,12 +2470,10 @@ export class Skadi {
     await this.sessions.save(session);
     const plan = normalisePlan(session.plan);
     this.broadcast('session_plan', { sessionId: id, plan, source });
-    if (source === 'user') {
-      const turn = this.turns.get(id);
-      if (turn?.agent?.running) {
-        turn.agent.steer(`[Execution plan edited by the user; revision ${plan.revision}. Re-read the authoritative live plan at the next step and follow it. Do not recreate skipped or deleted items.]`);
-      }
-    }
+    // No steer message for a user edit: the plan is re-read into the guidance
+    // before every model request, so the next step already sees it. A steer
+    // used to land in the transcript as if the user had typed it, which both
+    // cluttered the chat and read to small models as a new instruction.
     return plan;
   }
 
@@ -2431,7 +2489,7 @@ export class Skadi {
         `[Automatic background task completion]\n` +
         `The background command \`${task.command}\` finished with exit code ${task.exitCode} after ${dur}.\n` +
         `${(task.tail || '').trim() || '(no output)'}\n\n` +
-        `Continue the original work now. Inspect this result, run the next required analysis or verification, update the execution plan, and finish the requested deliverable. Do not wait for another user message.`;
+        `Continue the original work now. Inspect this result, run the next required analysis or verification, update the plan if there is one, and finish the requested deliverable. Do not wait for another user message.`;
       try {
         // A live turn receives a system steer at its next legal boundary. If
         // it already ended, start a continuation turn automatically: saying
@@ -3064,8 +3122,17 @@ export class Skadi {
         }
 
         // ---- content -----------------------------------------------------
-        case 'GET skills':
-          return json(200, await this.skills.list());
+        case 'GET skills': {
+          // Built-in skills say whether they match the version the app ships.
+          const bundled = bundledSkillStatus(join(ROOT, 'defaults', 'skills'), join(ROOT, 'skills'));
+          return json(200, (await this.skills.list()).map((skill) => ({ ...skill, builtin: bundled[skill.name] ?? null })));
+        }
+        case 'POST skill/restore':
+          try {
+            return json(200, { restored: restoreBundledSkill(join(ROOT, 'defaults', 'skills'), join(ROOT, 'skills'), (await readBody()).name) });
+          } catch (err) {
+            return json(404, { error: err.message });
+          }
         case 'GET skill': {
           const name = url.searchParams.get('name');
           if (!name) return json(400, { error: 'name required' });
@@ -3200,6 +3267,7 @@ export class Skadi {
           await this.stopTurn(id);
           await this.closeBrowser(id);
           await this.sessions.remove(id);
+          await this.pixelStudio.remove(id).catch(() => {});
           return json(200, { ok: true });
         }
         case 'POST sessions/wipe': {
@@ -3484,6 +3552,21 @@ export class Skadi {
             for (const child of children) child.agent.settings = this.settings;
           }
           return json(200, this.settings);
+        case 'GET pixel/png': {
+          // A chat's canvas as it is now, so a reopened chat can show its art.
+          const canvas = (await this.pixelStudio.canvases(url.searchParams.get('session'))).get(url.searchParams.get('name') || '');
+          if (!canvas) return json(404, { error: 'no such canvas' });
+          const scale = Math.max(1, Math.min(16, Number(url.searchParams.get('scale')) || Math.floor(256 / Math.max(canvas.w, canvas.h)) || 1));
+          res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+          res.end(canvas.png(scale));
+          return;
+        }
+        case 'GET search/status':
+          return json(200, this.webSearchStatus);
+        case 'POST search/searxng/reinstall':
+          // Answers at once; progress arrives as web_search_status events.
+          this.localSearxng.reinstall(this.settings).catch((err) => console.error('[searxng]', err.message));
+          return json(200, { ok: true });
         case 'POST settings/reset':
           this.settings = resetSettings();
           this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));

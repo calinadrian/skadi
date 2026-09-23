@@ -1,6 +1,7 @@
 ---
 name: browser-review
 description: Drive Skadi's embedded browser to check your own UI work — open a page, read it, click it, screenshot it, check the console.
+triggers: in the browser|screenshot|open the page|test the (page|site|ui|game)|check (how it looks|the page|the site)|does it (look|work) right
 ---
 
 # Reviewing your work in the browser
@@ -12,7 +13,7 @@ The viewport is fixed at **1280×800**. This matters: screenshot pixels and clic
 coordinates are the same coordinate space, so a point you identify in an image is
 a point you can click.
 
-## The loop
+## Quick start
 
 1. Make the change with the file tools.
 2. Make sure something is serving the page. If a dev server is not already
@@ -24,6 +25,11 @@ a point you can click.
    threw during render can still look plausible in a screenshot.
 5. `browser_read` to confirm the expected text and structure actually rendered.
 6. `browser_screenshot` so the user can see it.
+7. Report what you saw: "no console errors, the heading reads 'Dashboard',
+   the three cards render". Fix and repeat if anything is wrong.
+
+A single HTML file needs no server: skip step 2 and `browser_open` its full
+path, e.g. `C:/Users/me/site/index.html`.
 
 ## Opening local files
 
@@ -44,7 +50,7 @@ anything that needs one. Under `file://` the page's origin is opaque, so
 fail there even though the same page works when served. If you see that, serve
 the directory instead of blaming the markup.
 
-Step 2 of the loop is about serving; skip it when you are opening a file
+Step 2 of the quick start is about serving; skip it when you are opening a file
 directly.
 
 ## Clicking

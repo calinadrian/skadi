@@ -102,10 +102,17 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
 - **File and shell tools** confined to the project folder you choose: range-safe
   large-file reads, ripgrep-first search with a portable fallback, writes, edits,
   globs and commands.
-- **Free web search** through DuckDuckGo out of the box, or your own SearXNG
-  instance — no paid search API key required. If Docker is available, Skadi can
-  also start and stop a private SearXNG container alongside the app. The globe
-  button in the composer enables or disables search separately for each chat.
+- **Free web search** through DuckDuckGo out of the box — no paid search API
+  key required. One switch turns on **private search with SearXNG**, run
+  natively on your machine (no Docker): Skadi installs it by itself the first
+  time, with Python 3.10+. The globe button in the composer enables or disables
+  search separately for each chat.
+- **Built-in pixel art studio.** Ask for pixel art, sprites, tiles or retro
+  graphics and the agent paints them with drawing tools on a palette-locked
+  canvas, checks the result, and exports crisp PNGs with ready-to-paste HTML,
+  CSS and game code — including sprite sheets and autotile sets. Built to work
+  with small local models. The approach is ported from
+  [Texel Studio](https://github.com/EYamanS/texel-studio).
 - **Permission modes** from *Manual* to *Auto*, so you decide what runs unasked.
 - **Undo and redo** every file a chat wrote — one file, or the whole chat.
 - **A live execution plan** for substantial work. The agent keeps one step active
@@ -114,9 +121,11 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
 - **An embedded browser** per chat, driven by you and the agent together; the agent
   can screenshot, click, type and read the console to check its own work.
 - **Skills and memory** the agent can read and write, kept as plain Markdown.
+  A skill that matches a request (pixel art, web research, UI design, browser
+  checks) is handed to the model automatically, so small models follow it too.
 - **Context compaction** so long sessions don't die at the window's edge.
 - **Automatic read-only subagents** for bounded search, inspection and summary work, with a configurable reasoning level that defaults to none; children are visible to reconnect/Stop and hand control back when semantic supervision finds no progress.
-- **Semantic loop recovery** that judges progress against the request, removes detected bad read-only cycles from active context, and redirects the agent without a fixed call-count cutoff.
+- **Loop recovery** that catches exact repeats every step and, every few steps, asks whether the last step added anything — as a one-line hint, never by deleting evidence.
 - **Photos, files and folders** as attachments, for vision models.
 
 **Bring any model**
@@ -137,10 +146,10 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
 2. **Pick a project.** The folder icon under the prompt selects the directory the
    agent works in; **+** adds one.
 3. **Get a model, then load it.** Open **Local AI** in the top bar and choose
-   **Browse models**. The tuned profiles each have a **Get model** button that
-   opens the right Hugging Face page (the recommended one is Qwen3.8-27B IQ3_S,
-   about 12 GB), or search for any GGUF yourself; Skadi tells you whether a file
-   fits your GPU before you download it. Then pick the file and a profile (or
+   **Get models**. Search Hugging Face for any GGUF; Skadi tells you whether a
+   file fits your GPU before you download it. Or open the **Skadi catalog** tab,
+   where each tuned profile has a **Get model** button that opens the right
+   Hugging Face page (the recommended one is Qwen3.8-27B IQ3_S, about 12 GB). Then pick the file and a profile (or
    *Default settings*) and press **Load**. The forecast shows what it will cost
    first.
 4. **Ask for something.** *"Add a dark mode toggle to this page and check it in

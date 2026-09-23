@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 
-const MUTATION_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'memory_write', 'skill_write']);
-const VERIFICATION_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_console', 'browser_read', 'task_log']);
-const DISCOVERY_TOOLS = new Set(['grep', 'glob', 'list_dir', 'read_file', 'web_search', 'browser_extract', 'memory_search', 'skill_read']);
+const MUTATION_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'memory_write', 'skill_write', 'pixel_export']);
+const VERIFICATION_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_console', 'browser_read', 'task_log', 'pixel_view']);
+const DISCOVERY_TOOLS = new Set(['grep', 'glob', 'list_dir', 'read_file', 'web_search', 'browser_extract', 'memory_search', 'skill_read', 'load_skill']);
+// Drawing on a pixel canvas is real work that has not reached a file yet: it
+// must never count as "searching without editing".
+const CREATIVE_TOOLS = new Set(['pixel_new', 'pixel_draw', 'pixel_import']);
 
 const PLACEHOLDER_PATTERNS = [
   /\b(?:todo|placeholder|coming soon|not implemented)\b/i,
@@ -62,12 +65,14 @@ export function applyLedgerOverride(ledger, override) {
 export function ledgerSnapshot(ledger) {
   return {
     request: ledger.request,
+    implementation: ledger.implementation,
     mutations: ledger.mutations,
     materialMutations: ledger.materialMutations,
     verifications: ledger.verifications,
     phase: ledger.phase,
     inspected: [...ledger.inspected].slice(-20),
     gaps: [...ledger.artifactGaps.entries()],
+    last: ledger.last,
   };
 }
 
@@ -197,6 +202,8 @@ export function createProgressLedger(request = '') {
     actions: new Map(),
     loopStrikes: new Map(),
     last: '',
+    creative: false,
+    pixelViewed: false,
     dismissed: new Set(),
     note: '',
     phaseLock: '',
@@ -224,11 +231,11 @@ export function observeToolRound(ledger, calls, results) {
         fingerprint,
         strikes,
         reason: result.ok === false
-          ? `${name} repeated the same failed action without adapting`
-          : `${name} repeated an action that returned the same evidence`,
+          ? `${name} failed the same way as the last time it was called with these arguments`
+          : `${name} was called again with the same arguments and returned the same evidence`,
         next: strikes > 1
-          ? 'abandon this approach; choose a different decisive test or report the precise blocker'
-          : 'use the evidence already collected and take the next implementation or verification step',
+          ? 'Abandon this approach: try a different one, or tell the user exactly what is blocking you.'
+          : 'Use the result you already have and move on to the next step.',
       };
     }
     ledger.actions.set(fingerprint, { outcome, round: ledger.rounds });
@@ -238,6 +245,12 @@ export function observeToolRound(ledger, calls, results) {
       if (target) ledger.inspected.add(clip(target, 180));
       if (ledger.phase === 'locate' && !ledger.phaseLock) ledger.phase = 'diagnose';
     }
+    if (CREATIVE_TOOLS.has(name) && result.ok !== false) {
+      ledger.creative = true;
+      if (ledger.phase === 'locate' || ledger.phase === 'diagnose') ledger.phase = ledger.phaseLock || 'implement';
+    }
+    // The drawing tools return the grid; the model has looked at its art.
+    if ((name === 'pixel_draw' || name === 'pixel_view') && result.ok !== false) ledger.pixelViewed = true;
     if (MUTATION_TOOLS.has(name) && result.ok !== false) {
       ledger.mutations++;
       if (!ledger.firstMutationRound) ledger.firstMutationRound = ledger.rounds;
@@ -262,7 +275,9 @@ export function observeToolRound(ledger, calls, results) {
     // Test names, diffs and file reads routinely contain "todo" or
     // "placeholder" without the deliverable being incomplete.
     const rendered = VERIFICATION_TOOLS.has(name) && name !== 'task_log';
-    const verifies = VERIFICATION_TOOLS.has(name) || (name === 'run_command' && commandVerifies(args?.command));
+    // Exporting art the model has already looked at is checked art.
+    const verifies = VERIFICATION_TOOLS.has(name) || (name === 'run_command' && commandVerifies(args?.command))
+      || (name === 'pixel_export' && ledger.pixelViewed);
     const runtimeGap = rendered ? placeholderReason(result.content) : '';
     if (runtimeGap && ledger.implementation) ledger.artifactGaps.set('(rendered output)', runtimeGap);
     else if (verifies && result.ok !== false) ledger.artifactGaps.delete('(rendered output)');
@@ -284,24 +299,59 @@ export function recordLoop(ledger, fingerprint = 'semantic') {
   return strikes;
 }
 
-export function progressLedgerText(ledger) {
-  const inspected = [...ledger.inspected].slice(-8);
+/** Plain names for the phases, shared with the UI. */
+export const STAGE_NAMES = { locate: 'Find', diagnose: 'Understand', implement: 'Change', verify: 'Check', complete: 'Done' };
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The one thing the model should do next, judged from the ledger alone. The
+ * agent loop may replace it with a sharper instruction (a loop hint, a
+ * blocked finish); either way the model is handed exactly one.
+ */
+export function nextStep(ledger, { planning = false, hasPlan = false } = {}) {
+  const gaps = completionGaps(ledger);
+  if (!ledger.implementation) return 'Answer the user directly as soon as you have enough information. Do not keep searching once you have it.';
+  if (gaps.length) return `Replace the placeholder or empty content in ${gaps.map((gap) => gap.split(':')[0]).join(', ')} with the real content, then check the result again.`;
+  if (ledger.materialMutations === 0 && ledger.creative) {
+    return 'Keep drawing: read the grid, fix what its suggestions point out, then pixel_export the art to a file and use it where it belongs.';
+  }
+  if (ledger.materialMutations === 0) {
+    if (ledger.rounds === 0 && planning && !hasPlan && ledger.complexity === 'hard') {
+      return 'This is a bigger task. First write a short plan with update_plan (3-6 steps), then start on step 1.';
+    }
+    if (ledger.rounds === 0) return 'Find the code that needs to change: search for it, then read only the lines you need.';
+    return 'As soon as you know which file to change, edit it. Do not re-read files you have already looked at.';
+  }
+  if (ledger.verifications === 0) return 'Check your change: run the relevant test or build, or open the result in the browser. Then report.';
+  return 'Your change is made and checked. If the check showed a problem, fix it; otherwise tell the user what you changed and how you checked it, then stop.';
+}
+
+/**
+ * The progress block sent with every model request. Written for small local
+ * models: a handful of short, plain lines, facts first, and a single "Next"
+ * instruction last, where recency gives it the most weight.
+ */
+export function progressLedgerText(ledger, { next = '', planning = false, hasPlan = false } = {}) {
+  const inspected = [...ledger.inspected].slice(-6);
   const gaps = completionGaps(ledger);
   const unedited = ledger.implementation && ledger.rounds > 0 && ledger.materialMutations === 0;
+  const sofar = [
+    inspected.length ? `looked at ${plural(ledger.inspected.size, 'file or search', 'files or searches')} (${inspected.join(', ')})` : 'looked at nothing yet',
+    ledger.implementation ? `changed ${plural(ledger.materialMutations, 'project file')}` : '',
+    ledger.implementation ? `${plural(ledger.verifications, 'passing check')}` : '',
+  ].filter(Boolean).join('; ');
   return [
-    'PROGRESS LEDGER (authoritative; do not repeat completed discovery):',
-    `Objective: ${ledger.request || '(unknown)'}`,
-    `Estimated task size: ${ledger.complexity}`,
-    `Phase: ${ledger.phase}`,
-    `File edits: ${ledger.mutations}; material deliverable edits: ${ledger.materialMutations}; valid post-edit verification actions: ${ledger.verifications}`,
-    `Inspected: ${inspected.length ? inspected.join(', ') : '(none)'}`,
-    `Open completion gaps: ${gaps.length ? gaps.join('; ') : '(none detected in edited files)'}${unedited ? ' -- BUT the task is NOT complete: no deliverable file has been edited yet. Research alone does not satisfy the request; make the edits.' : ''}`,
-    `Latest result: ${ledger.last || '(none)'}`,
-    ledger.note ? `User correction (overrides anything above): ${ledger.note}` : '',
-    ledger.dismissed?.size ? `The user reviewed and dismissed these gaps as not real: ${[...ledger.dismissed].join(', ')}.` : '',
-    ledger.implementation
-      ? `Completion contract: locate the responsible code, establish a falsifiable cause, edit it, then run a relevant verification. Syntax-only checks do not prove runtime behavior.${ledger.complexity === 'hard' ? ' A scaffold, empty dataset, placeholder assets, or a stated remaining gap is not completion.' : ''}`
-      : 'Completion contract: answer the objective directly and stop when sufficient evidence exists.',
+    '## Progress (kept by Skadi from your tool results; trust it over your memory)',
+    `Task: ${ledger.request || '(unknown)'}`,
+    ledger.implementation ? `Stage: ${STAGE_NAMES[ledger.phase] || ledger.phase} (Find > Understand > Change > Check > Done)` : '',
+    `So far: ${sofar}.`,
+    unedited ? 'Not done yet: no project file has been changed, and research alone does not finish this task.' : '',
+    gaps.length ? `Still wrong: ${gaps.join('; ')}.` : '',
+    ledger.last ? `Last step: ${ledger.last}` : '',
+    ledger.dismissed?.size ? `The user checked these and says they are fine; ignore them: ${[...ledger.dismissed].join(', ')}.` : '',
+    ledger.note ? `Note from the user (follow it over everything above): ${ledger.note}` : '',
+    `Next: ${next || nextStep(ledger, { planning, hasPlan })}`,
   ].filter(Boolean).join('\n');
 }
 
@@ -309,6 +359,7 @@ export function progressLedgerText(ledger) {
 export function ledgerView(ledger) {
   return {
     request: ledger.request,
+    implementation: ledger.implementation,
     complexity: ledger.complexity,
     phase: ledger.phase,
     rounds: ledger.rounds,

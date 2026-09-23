@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { unifiedDiff, statLine } from './diff.mjs';
 import { ROOT } from './config.mjs';
+import { PlanNotice, planText, planToolResult } from './plans.mjs';
 
 /**
  * Kill a spawned shell and whatever it started. `child.kill()` alone only
@@ -109,9 +110,224 @@ export function safePath(workspace, input) {
   return target;
 }
 
-function clip(text) {
+// Long output keeps both ends. The start says what ran; the end is where a
+// failing build or test run says why, and it is the part a head-only cut threw
+// away. The cut lands on line boundaries so no line arrives half-read.
+const CLIP_HEAD_CHARS = 8000;
+
+export function clip(text) {
   if (text.length <= MAX_OUTPUT_CHARS) return text;
-  return `${text.slice(0, MAX_OUTPUT_CHARS)}\n... [truncated, ${text.length - MAX_OUTPUT_CHARS} more characters]`;
+  let headEnd = text.lastIndexOf('\n', CLIP_HEAD_CHARS);
+  if (headEnd < CLIP_HEAD_CHARS / 2) headEnd = CLIP_HEAD_CHARS;
+  let tailStart = text.indexOf('\n', text.length - (MAX_OUTPUT_CHARS - CLIP_HEAD_CHARS));
+  if (tailStart < 0 || tailStart - (text.length - (MAX_OUTPUT_CHARS - CLIP_HEAD_CHARS)) > 2000) {
+    tailStart = text.length - (MAX_OUTPUT_CHARS - CLIP_HEAD_CHARS);
+  }
+  const cut = tailStart - headEnd;
+  return `${text.slice(0, headEnd)}\n... [${cut} characters cut from the middle; the start and the end are kept] ...${text.slice(tailStart)}`;
+}
+
+// ---- shell habits from elsewhere -------------------------------------------------
+
+/**
+ * Rewrite `a && b` / `a || b` for Windows PowerShell 5.1, which has neither:
+ * `a; if ($?) { b }` and `a; if (-not $?) { b }`. Quoted text is left alone.
+ */
+export function chainForPowerShell(command) {
+  const parts = [];
+  const ops = [];
+  let buf = '';
+  let quote = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      buf += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      buf += ch;
+    } else if ((ch === '&' || ch === '|') && command[i + 1] === ch) {
+      parts.push(buf.trim());
+      ops.push(ch);
+      buf = '';
+      i += 1;
+    } else {
+      buf += ch;
+    }
+  }
+  if (!ops.length) return command;
+  parts.push(buf.trim());
+  // Not a chain with one reading (an empty side, or && and || mixed, whose
+  // $? after a skipped `if` no longer means what bash means): leave it for
+  // PowerShell to report.
+  if (parts.some((p) => !p) || new Set(ops).size > 1) return command;
+  // Nested, so each step still sees the $? of the step before it.
+  const test = ops[0] === '&' ? '$?' : '-not $?';
+  let out = parts[parts.length - 1];
+  for (let i = parts.length - 2; i >= 0; i -= 1) out = `${parts[i]}; if (${test}) { ${out} }`;
+  return out;
+}
+
+// Commands that start something meant to keep running.
+const SERVER_COMMAND = new RegExp(
+  [
+    String.raw`\b(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start|serve|preview)\b`,
+    String.raw`\bnpx\s+(vite|next\s+dev|serve|http-server|live-server)\b`,
+    String.raw`^\s*(vite|http-server|live-server|serve)\b`,
+    String.raw`\bnext\s+dev\b`,
+    String.raw`\bpython3?\s+-m\s+http\.server\b`,
+    String.raw`\b(flask\s+run|uvicorn\s|php\s+-S\s|manage\.py\s+runserver)`,
+  ].join('|'),
+  'i',
+);
+
+export const looksLikeServer = (command) => SERVER_COMMAND.test(String(command));
+
+// Unix commands that fail in PowerShell, with what to write instead.
+const UNIX_HABITS = [
+  [/parameter name '(rf|fr|r|f)'/i, 'rm -rf', 'Remove-Item -Recurse -Force <path>'],
+  [/'touch' is not recognized/i, 'touch', 'New-Item -ItemType File <path> (or edit with write_file)'],
+  [/'which' is not recognized/i, 'which', 'Get-Command <name>'],
+  [/'export' is not recognized/i, 'export', "$env:NAME = 'value'"],
+  [/'head' is not recognized/i, 'head', 'Get-Content <file> -TotalCount 20 (or read_file with a line range)'],
+  [/'tail' is not recognized/i, 'tail', 'Get-Content <file> -Tail 20'],
+  [/'grep' is not recognized/i, 'grep', 'Select-String -Pattern <text> <files> (or the grep tool)'],
+  [/'sed' is not recognized/i, 'sed', 'the edit_file tool'],
+  [/'wc' is not recognized/i, 'wc -l', '(Get-Content <file>).Count'],
+  [/parameter name 'p'.*\n?.*mkdir|mkdir.*parameter name 'p'/i, 'mkdir -p', 'New-Item -ItemType Directory -Force <path>'],
+];
+
+/** A line naming the PowerShell spelling of a Unix command that just failed. */
+export function unixHabitHint(output) {
+  const hits = UNIX_HABITS.filter(([re]) => re.test(output)).map(([, unix, ps]) => `\`${unix}\` → ${ps}`);
+  return hits.length ? `Hint: this shell is Windows PowerShell 5.1. Use ${hits.join('; ')}.` : '';
+}
+
+// ---- helping a small model recover from a near miss --------------------------
+//
+// A small model's edits and paths are often almost right: \n where the file has
+// \r\n, a tab where the file indents with spaces, src/app.js for app.js. Each of
+// those used to end in a bare "not found", which it tends to answer by sending
+// the identical call again. These helpers either apply the evidently intended
+// change or say precisely what to send instead.
+
+/** Paths in the workspace that are probably the one that was meant. */
+async function suggestPaths(workspace, input, limit = 5) {
+  const wanted = basename(String(input).replace(/\\/g, '/')).toLowerCase();
+  if (!wanted) return [];
+  const stem = wanted.replace(/\.[^.]+$/, '');
+  const exact = [];
+  const close = [];
+  let seen = 0;
+  const root = resolve(workspace);
+  for await (const rel of walk(root, root)) {
+    if (++seen > 20000) break;
+    const name = rel.slice(rel.lastIndexOf('/') + 1).toLowerCase();
+    if (name === wanted) exact.push(rel);
+    else if (stem.length >= 3 && name.replace(/\.[^.]+$/, '') === stem) close.push(rel);
+    if (exact.length >= limit) break;
+  }
+  return [...exact, ...close].slice(0, limit);
+}
+
+async function missingFile(workspace, path) {
+  const guesses = await suggestPaths(workspace, path).catch(() => []);
+  return new ToolError(
+    `no such file: ${path}` +
+      (guesses.length ? `. Did you mean: ${guesses.join(', ')}?` : '. Use glob or list_dir to find it.'),
+  );
+}
+
+const lineBreakOf = (text) => (text.includes('\r\n') ? '\r\n' : '\n');
+const withBreaks = (text, eol) => String(text).replace(/\r?\n/g, eol);
+const leadOf = (line) => /^[ \t]*/.exec(line)[0];
+
+/** The indent step a block uses: a tab, or the smallest gap between space indents. */
+function indentUnit(lines, fallback) {
+  const leads = lines.filter((l) => l.trim()).map(leadOf);
+  if (leads.some((l) => l.includes('\t'))) return '\t';
+  const widths = [...new Set(leads.map((l) => l.length))].sort((a, b) => a - b);
+  let step = 0;
+  for (let i = 1; i < widths.length; i += 1) {
+    const gap = widths[i] - widths[i - 1];
+    if (gap > 0 && (!step || gap < step)) step = gap;
+  }
+  if (!step) step = widths.find((w) => w > 0) || 0;
+  return step ? ' '.repeat(step) : fallback;
+}
+
+/** How many indent steps deep a leading run of whitespace is. */
+const levelsOf = (lead, unit) => (unit === '\t'
+  ? [...lead].reduce((n, ch) => n + (ch === '\t' ? 1 : 0.25), 0)
+  : [...lead].reduce((n, ch) => n + (ch === '\t' ? 1 : 1 / unit.length), 0));
+
+/**
+ * old_string matched nowhere exactly: look for the one place it matches when
+ * only whitespace at the ends of lines is ignored. Returns the line range and
+ * the replacement re-indented to the file's own style, or null when there is no
+ * such place or more than one.
+ */
+function looseMatch(fileLines, oldText, newText) {
+  const oldLines = oldText.split(/\r?\n/);
+  while (oldLines.length > 1 && !oldLines[oldLines.length - 1].trim()) oldLines.pop();
+  while (oldLines.length > 1 && !oldLines[0].trim()) oldLines.shift();
+  const want = oldLines.map((l) => l.trim());
+  if (!want.some(Boolean)) return null;
+
+  const hits = [];
+  for (let i = 0; i + want.length <= fileLines.length; i += 1) {
+    let ok = true;
+    for (let j = 0; j < want.length && ok; j += 1) ok = fileLines[i + j].trim() === want[j];
+    if (ok) hits.push(i);
+    if (hits.length > 1) return null;
+  }
+  if (hits.length !== 1) return null;
+
+  const start = hits[0];
+  const matched = fileLines.slice(start, start + want.length);
+  const newLines = newText.split(/\r?\n/);
+  const anchorOld = oldLines.find((l) => l.trim()) ?? '';
+  const anchorFile = matched.find((l) => l.trim()) ?? '';
+  const fileUnit = indentUnit(matched.length > 1 ? matched : fileLines, '  ');
+  const oldUnit = indentUnit([...oldLines, ...newLines], fileUnit);
+  const baseLevels = levelsOf(leadOf(anchorOld), oldUnit);
+  const fileLead = leadOf(anchorFile);
+  const replacement = newLines.map((line) => {
+    if (!line.trim()) return '';
+    const rel = Math.round(levelsOf(leadOf(line), oldUnit) - baseLevels);
+    const lead = rel >= 0
+      ? fileLead + fileUnit.repeat(rel)
+      : fileLead.slice(0, Math.max(0, fileLead.length - fileUnit.length * -rel));
+    return lead + line.trimStart();
+  });
+  return { start, count: want.length, replacement };
+}
+
+/** The lines most like old_string, numbered, for a retry that copies them exactly. */
+function closestLines(fileLines, oldText) {
+  const want = oldText.split(/\r?\n/).map((l) => l.trim());
+  const size = Math.max(1, want.length);
+  let best = { score: 0, at: -1 };
+  for (let i = 0; i < fileLines.length; i += 1) {
+    let score = 0;
+    for (let j = 0; j < size && i + j < fileLines.length; j += 1) {
+      const have = fileLines[i + j].trim();
+      if (want[j] && have === want[j]) score += 2;
+      else if (want[j] && have && (have.includes(want[j]) || want[j].includes(have))) score += 1;
+    }
+    if (score > best.score) best = { score, at: i };
+  }
+  if (best.at < 0) {
+    // Nothing lines up: fall back to the first line naming the longest identifier.
+    const word = (oldText.match(/[A-Za-z_$][\w$]{3,}/g) || []).sort((a, b) => b.length - a.length)[0];
+    const at = word ? fileLines.findIndex((l) => l.includes(word)) : -1;
+    if (at < 0) return null;
+    best = { at };
+  }
+  const from = best.at;
+  const to = Math.min(fileLines.length, from + Math.min(size + 1, 12));
+  const body = fileLines.slice(from, to).map((l, k) => `${String(from + k + 1).padStart(5)}\t${l}`).join('\n');
+  return { from: from + 1, to, body };
 }
 
 const inside = (root, target) => {
@@ -348,7 +564,7 @@ export function buildTools(ctx) {
       async run({ path, start_line, end_line }) {
         const file = safePath(ctx.workspace, path);
         const info = await stat(file).catch(() => null);
-        if (!info) throw new ToolError(`no such file: ${path}`);
+        if (!info) throw await missingFile(ctx.workspace, path);
         if (info.isDirectory()) throw new ToolError(`${path} is a directory; use list_dir`);
         const ranged = Number.isInteger(start_line) || Number.isInteger(end_line);
         if (info.size > MAX_READ_BYTES && !ranged) {
@@ -399,7 +615,8 @@ export function buildTools(ctx) {
       mutates: true,
       schema: {
         description:
-          'Replace an exact string in a file. old_string must appear exactly once unless replace_all is true.',
+          'Replace an exact string in a file. old_string must appear exactly once unless replace_all is true. ' +
+          'Copy old_string from read_file output without the line-number prefix.',
         parameters: {
           type: 'object',
           properties: {
@@ -413,23 +630,55 @@ export function buildTools(ctx) {
       },
       async run({ path, old_string, new_string, replace_all }, meta) {
         const file = safePath(ctx.workspace, path);
-        if (!existsSync(file)) throw new ToolError(`no such file: ${path}`);
+        if (!existsSync(file)) throw await missingFile(ctx.workspace, path);
+        if (typeof old_string !== 'string' || !old_string) {
+          throw new ToolError('old_string is empty. To create or replace a whole file use write_file.');
+        }
         const before = await readFile(file, 'utf8');
-        const count = before.split(old_string).length - 1;
-        if (count === 0) throw new ToolError(`old_string not found in ${path}`);
-        if (count > 1 && !replace_all) {
+        // The model writes \n; a Windows file has \r\n. Speak the file's
+        // dialect, or every multi-line edit to a CRLF file misses.
+        const eol = lineBreakOf(before);
+        const next = withBreaks(new_string ?? '', eol);
+        let old = old_string;
+        let count = before.split(old).length - 1;
+        if (count === 0 && withBreaks(old, eol) !== old) {
+          old = withBreaks(old, eol);
+          count = before.split(old).length - 1;
+        }
+        let after;
+        let note = '';
+        if (count === 0) {
+          const fileLines = before.split(/\r?\n/);
+          const loose = replace_all ? null : looseMatch(fileLines, old_string, new_string ?? '');
+          if (!loose) {
+            const near = closestLines(fileLines, old_string);
+            throw new ToolError(
+              `old_string not found in ${path}.` +
+                (near
+                  ? ` Closest text is lines ${near.from}-${near.to}; copy it exactly (without the line numbers) and retry:\n${near.body}`
+                  : ' Read the file again with read_file and copy the text exactly.'),
+            );
+          }
+          // One place matches once whitespace is ignored: apply it there,
+          // indented the way the file indents, and say so.
+          const lines = [...fileLines];
+          lines.splice(loose.start, loose.count, ...loose.replacement);
+          after = lines.join(eol);
+          count = 1;
+          note = `; matched lines ${loose.start + 1}-${loose.start + loose.count} ignoring whitespace, indented as the file is -- check the diff`;
+        } else if (count > 1 && !replace_all) {
           throw new ToolError(
             `old_string appears ${count} times in ${path}. Add more surrounding context, or pass replace_all.`,
           );
+        } else {
+          // A function replacement, so "$&" or "$1" in the new text is written literally.
+          after = replace_all ? before.split(old).join(next) : before.replace(old, () => next);
         }
-        const after = replace_all
-          ? before.split(old_string).join(new_string)
-          : before.replace(old_string, new_string);
         await writeFile(file, after, 'utf8');
         const { diff, added, removed } = unifiedDiff(before, after);
         ctx.recordEdit?.({ callId: meta?.callId ?? null, path, before, after, added, removed, existed: true });
         const n = replace_all ? count : 1;
-        return `${statLine('Edited', path, added, removed)} (${n} replacement${n > 1 ? 's' : ''})${diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : ''}`;
+        return `${statLine('Edited', path, added, removed)} (${n} replacement${n > 1 ? 's' : ''}${note})${diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : ''}`;
       },
     },
 
@@ -540,11 +789,18 @@ export function buildTools(ctx) {
           );
         }
         const root = resolve(ctx.workspace);
+        // Windows PowerShell 5.1 refuses && and || outright; cmd has them.
+        if (shell !== 'cmd') command = chainForPowerShell(command);
+        // A dev server never exits: in the foreground it would hold the turn
+        // until the timeout killed it. Such commands go to the background.
+        const server = !background && ctx.startBackground && looksLikeServer(command);
+        if (server) background = true;
         // Background tasks are not snapshot-diffed: the process outlives this
         // call, so its writes would land in the next command's before/after.
         if (background && ctx.startBackground) {
           const task = ctx.startBackground({ command, shell });
           return (
+            (server ? 'This looks like a server that keeps running, so it was started in the background.\n' : '') +
             `Started background task ${task.id}: ${command}\n` +
             `It keeps running while you continue. Read its output anytime with task_log (task_id "${task.id}"); ` +
             `when it finishes, its result is delivered to this chat and the agent resumes automatically.`
@@ -605,7 +861,8 @@ export function buildTools(ctx) {
           child.on('close', async (code) => {
             clearTimeout(timer);
             meta.signal?.removeEventListener('abort', onAbort);
-            const base = `exit code ${code}\n${out.trim() || '(no output)'}`;
+            const hint = isCmd ? '' : unixHabitHint(out);
+            const base = `exit code ${code}\n${out.trim() || '(no output)'}${hint ? `\n\n${hint}` : ''}`;
             let changes = [];
             if (before) {
               try {
@@ -644,7 +901,7 @@ export function buildTools(ctx) {
       },
       async run({ path }) {
         const file = safePath(ctx.workspace, path);
-        if (!existsSync(file)) throw new ToolError(`no such file: ${path}`);
+        if (!existsSync(file)) throw await missingFile(ctx.workspace, path);
         await rm(file);
         return `Deleted ${path}`;
       },
@@ -698,42 +955,90 @@ export function buildTools(ctx) {
     tools.update_plan = {
       schema: {
         description:
-          'Create and maintain the chat execution plan. For medium or hard implementation work, set a concise 3-8 step outcome plan before broad work, then mark a step working/done/blocked/review as progress changes. The user can edit, reorder, skip, or delete items at any time; never recreate skipped/deleted work or replace a user-edited plan.',
+          'A short checklist for bigger, multi-step tasks (skip it for small ones). Start with action "set" and 3-6 short steps; the first step becomes current. ' +
+          'When a step is finished, use action "status" with its step number and status "done"; the next step starts automatically. ' +
+          'The user can edit the plan at any time: follow it as written and never do skipped steps.',
         parameters: {
           type: 'object',
           properties: {
-            action: { type: 'string', enum: ['set', 'add', 'edit', 'status', 'move', 'remove', 'restore'] },
-            items: {
-              type: 'array',
-              description: 'Initial ordered steps for action=set.',
-              items: {
-                type: 'object',
-                properties: {
-                  text: { type: 'string' },
-                  status: { type: 'string', enum: ['queued', 'working', 'blocked', 'review', 'done', 'skipped'] },
-                  note: { type: 'string' },
-                  required: { type: 'boolean' },
-                },
-                required: ['text'],
-              },
-            },
-            itemId: { type: 'string', description: 'Target item id for edit/status/move/remove/restore.' },
-            text: { type: 'string', description: 'Short outcome-focused step text for add/edit.' },
-            status: { type: 'string', enum: ['queued', 'working', 'blocked', 'review', 'done', 'skipped'] },
-            note: { type: 'string', description: 'Optional concise progress evidence or blocker.' },
-            required: { type: 'boolean' },
-            index: { type: 'integer', description: 'Zero-based insertion or destination position.' },
+            action: { type: 'string', enum: ['set', 'status', 'add', 'edit'], description: 'set = write the whole plan; status = change one step; add = append a step; edit = reword a step.' },
+            steps: { type: 'array', items: { type: 'string' }, description: 'For action=set: the steps in order, each a short outcome such as "Fix the login check".' },
+            step: { type: 'integer', description: 'Step number, starting at 1 (for status and edit).' },
+            status: { type: 'string', enum: ['working', 'done', 'blocked', 'skipped', 'queued'], description: 'For action=status.' },
+            text: { type: 'string', description: 'Step text for add or edit.' },
+            note: { type: 'string', description: 'Optional short note, e.g. what blocked the step.' },
           },
           required: ['action'],
         },
       },
       async run(args) {
-        return JSON.stringify(await ctx.updatePlan(args), null, 2);
+        // A conflict with the user's edits, or a step number that does not
+        // exist, is explained rather than raised: an error card in the chat
+        // gives a small model nothing to act on, where the current plan does.
+        try {
+          return planToolResult(await ctx.updatePlan(args));
+        } catch (err) {
+          if (err instanceof PlanNotice) return `Plan not changed: ${err.message}.\n${planText(err.plan)}`;
+          throw err;
+        }
       },
     };
   }
 
   return tools;
+}
+
+// Names models reach for out of habit -- other harnesses' tools and shell
+// commands -- mapped to the tool here that does that job.
+const TOOL_HABITS = {
+  bash: 'run_command', shell: 'run_command', sh: 'run_command', cmd: 'run_command', powershell: 'run_command',
+  exec: 'run_command', execute: 'run_command', terminal: 'run_command', run: 'run_command',
+  cat: 'read_file', open: 'read_file', view: 'read_file', open_file: 'read_file', view_file: 'read_file',
+  ls: 'list_dir', dir: 'list_dir', list_files: 'list_dir', list_directory: 'list_dir',
+  write: 'write_file', create_file: 'write_file', save_file: 'write_file',
+  str_replace: 'edit_file', replace: 'edit_file', replace_in_file: 'edit_file', apply_patch: 'edit_file',
+  search: 'grep', search_files: 'grep', rg: 'grep', find: 'glob', find_files: 'glob',
+  rm: 'delete_file', remove_file: 'delete_file',
+};
+
+const squash = (name) => String(name).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/**
+ * What a tool name that does not exist most likely meant. `exact` is set when
+ * the difference is only case and separators (readFile, read-file, READ_FILE):
+ * one reading, safe to run as is. Otherwise `suggestions` holds up to three
+ * real names, closest first, to offer back to the model.
+ */
+export function suggestToolName(name, names) {
+  const want = squash(name);
+  const exact = names.find((n) => squash(n) === want);
+  if (exact) return { exact, suggestions: [exact] };
+  const scored = [];
+  const habit = TOOL_HABITS[String(name).toLowerCase().replace(/[-\s]/g, '_')];
+  if (habit && names.includes(habit)) scored.push({ n: habit, score: -1 });
+  for (const n of names) {
+    if (n === habit) continue;
+    const have = squash(n);
+    const distance = editDistance(want, have);
+    // "read" for read_file, "file_read" for read_file: containment either way.
+    const contains = want.length >= 3 && (have.includes(want) || want.includes(have));
+    if (contains) scored.push({ n, score: 0.5 + Math.abs(have.length - want.length) / 100 });
+    else if (distance <= Math.max(2, Math.floor(want.length / 3))) scored.push({ n, score: distance });
+  }
+  scored.sort((a, b) => a.score - b.score);
+  return { exact: null, suggestions: scored.slice(0, 3).map((s) => s.n) };
 }
 
 /** OpenAI-format tool list for the chat completions request. */

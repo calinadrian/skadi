@@ -393,6 +393,52 @@ export function applyReasoningDialect(body, provider) {
 export const INVALID_ARGS_KEY = '__skadi_invalid_arguments';
 
 /**
+ * Read arguments that are almost JSON, the way small models get them wrong:
+ * wrapped in a ```json fence or in a sentence, a trailing comma before } or ],
+ * or a raw line break or tab inside a string (file content, mostly). Returns
+ * the object, or null when the text still does not parse -- a call cut off
+ * mid-string stays broken on purpose, since guessing its end would run
+ * something the model never said.
+ */
+export function looseToolArguments(raw) {
+  let text = String(raw ?? '').trim();
+  const fence = /^```[\w-]*\s*\n?([\s\S]*?)\n?\s*```$/.exec(text);
+  if (fence) text = fence[1].trim();
+  const first = text.indexOf('{');
+  const last = text.lastIndexOf('}');
+  if (first < 0 || last < first) return null;
+  text = text.slice(first, last + 1);
+
+  // One pass that knows when it is inside a string: escape raw control
+  // characters there, and drop commas that only precede a closing bracket.
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      else if (ch === '\n') { out += '\\n'; continue; }
+      else if (ch === '\r') { out += '\\r'; continue; }
+      else if (ch === '\t') { out += '\\t'; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    if (ch === ',' && /^\s*[}\]]/.test(text.slice(i + 1))) continue;
+    out += ch;
+  }
+  try {
+    const parsed = JSON.parse(out);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Make one tool call's arguments legal JSON without losing what was said.
  * Valid arguments pass through untouched.
  */
@@ -405,6 +451,13 @@ export function repairToolArguments(call) {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return call;
     throw new Error('arguments must be a JSON object');
   } catch (err) {
+    // The usual small-model slips have one obvious reading. Fix those in place,
+    // so the call runs and the transcript carries clean JSON from then on.
+    const fixed = looseToolArguments(raw);
+    if (fixed) {
+      call.function.arguments = JSON.stringify(fixed);
+      return call;
+    }
     call.function.arguments = JSON.stringify({
       [INVALID_ARGS_KEY]: { reason: err.message, received: raw.slice(0, 500) },
     });

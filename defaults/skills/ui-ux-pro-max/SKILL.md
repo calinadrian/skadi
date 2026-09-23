@@ -1,9 +1,29 @@
 ---
 name: ui-ux-pro-max
 description: "UI/UX design intelligence for web, mobile, and desktop. This skill should be used when designing, building, reviewing, or fixing interfaces, including pages, components, design systems, accessibility, interaction, responsive layout, typography, color, charts, and stack-specific UI implementation. Searchable local data: 79 searchable styles (50 active), 192 product palettes and reasoning profiles, 74 font pairings, 119 UX guidelines, 105 icons, 17 GSAP presets, 25 chart types, and 22 stacks."
+triggers: landing page|home ?page|web ?site|web page|dashboard|redesign|restyle|make it (look )?(better|nicer|beautiful|modern|professional|pretty)|ui/ux|user interface|design system|looks? (bad|ugly|off|outdated)
 ---
 
 # UI/UX Pro Max - Design Intelligence
+
+## Quick start
+
+For any page, screen or component you build or restyle:
+
+1. Get a design direction with one command. Node is always available in
+   Skadi, so use the bundled search engine:
+   `node "${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/scripts/search.mjs" "<product type> <2-3 style words>" --design-system`
+   Use the colours, fonts, spacing and "avoid" list it prints.
+2. Build to these rules; they matter most:
+   - Text contrast at least 4.5:1. Body text 16px, line-height 1.5.
+   - Buttons and links at least 44x44px, with visible focus, hover and pressed states.
+   - Colours and spacing as CSS variables; one accent colour for primary actions.
+   - Mobile first: it must work at 375px wide with no horizontal scroll.
+   - SVG icons, never emoji as icons. Every image has alt text; every input a visible label.
+   - Transitions 150-300ms, and honour `prefers-reduced-motion`.
+3. For one specific question, search one domain, for example
+   `node "${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/scripts/search.mjs" "keyboard focus modal" --domain ux`.
+4. Check it in the browser at 375px and desktop widths before you report.
 
 Searchable local UI/UX guidance: 79 searchable styles (50 active), 192 product palettes and exact reasoning profiles, 74 font pairings, 119 UX guidelines, 105 curated icons, 17 GSAP presets, 25 chart types, and 22 technology stacks.
 

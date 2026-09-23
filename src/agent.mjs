@@ -3,8 +3,8 @@
 // stops calling tools. Everything interesting is emitted as an event so the UI
 // can render it as it happens rather than waiting for the turn to finish.
 import { EventEmitter } from 'node:events';
-import { ToolError } from './tools.mjs';
-import { streamCompletion, INVALID_ARGS_KEY } from './providers.mjs';
+import { ToolError, suggestToolName } from './tools.mjs';
+import { streamCompletion, INVALID_ARGS_KEY, looseToolArguments } from './providers.mjs';
 import {
   compactionSettings,
   estimateTokens,
@@ -38,9 +38,8 @@ Guidelines:
 - Make the smallest change that does the job, and match the surrounding style.
 - After editing code, run the relevant test or build command if one exists.
 - If a tool fails, read the error and adapt. Do not retry the identical call.
-- For implementation work, move deliberately through locate, diagnose, implement, and verify. A plausible theory is not a diagnosis, and a syntax check is not runtime proof.
-- For medium or hard implementation work, create a concise 3-8 step execution plan with update_plan before broad exploration. Keep exactly one current step marked working, update steps as evidence lands, and follow user edits to the plan. Do not recreate work the user skipped or deleted. A plan is a coordination surface, not an approval gate: continue automatically unless a real permission or product decision blocks you.
-- Delegate bounded discovery, searching, code-location, and summarisation work with delegate_task before doing broad exploration yourself. Use reasoning "none" for routine find/search/summary tasks; increase it only when the delegated analysis genuinely needs it. Keep edits and final runtime verification in the parent agent.
+- For code changes: find the code, understand the cause, change it, then check that it works. A guess is not a cause, and a syntax check does not prove the change works.
+- Every request ends with a short Progress note from Skadi, built from your own tool results. Trust it over your memory, and treat its "Next" line as the best next step.
 - When you are done, say plainly what you changed. If something did not work, say so.
 - This chat is the only one you can see. Other sessions are private and the harness blocks every path into them, so never go looking for them: what you know of earlier work is what is in this conversation, in memory, or in the project itself. If the user's request depends on something from another chat, ask them for it.`;
 
@@ -56,11 +55,32 @@ const PERMISSION_NOTES = {
   bypassPermissions: 'BYPASS MODE — all permission checks are skipped. Be extra careful: every command runs as-is.',
 };
 
+/**
+ * Set a turn's latest messages aside. They stay in the transcript where they
+ * happened, so the chat still reads in order, but carry `aside` and are left
+ * out of every model request. Used for an exact repeated step and for an
+ * answer a finish gate sent back. Returns the messages it marked.
+ */
+export function setAside(messages, from, reason) {
+  const marked = messages.slice(from);
+  for (const message of marked) message.aside = reason;
+  return marked;
+}
+
+/** The transcript as the model sees it: everything not set aside. */
+export const modelView = (messages) => (messages.some((message) => message.aside) ? messages.filter((message) => !message.aside) : messages);
+
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'];
 
+// Offered only when the matching tool exists, so a model is never told to
+// call something it does not have.
+const PLANNING_NOTE = `- For a bigger task with several parts, keep a short checklist with update_plan: 3-6 steps, then mark each step done as you finish it. Skip it for small tasks. If the user edits the plan, follow their version and never do skipped steps.`;
+const DELEGATION_NOTE = `- For a broad search ("where is X handled?", "summarise this folder"), you can hand it to a read-only helper with delegate_task, reasoning "none". Keep edits and the final check for yourself.`;
+
 /** Assemble the system prompt from the base rules plus context blocks. */
-export async function buildSystemPrompt({ skills, memory, project, provider, model, browser, permissionMode }) {
-  const parts = [BASE_PROMPT + (provider?.managed ? `\n${LOCAL_NOTE}` : '')];
+export async function buildSystemPrompt({ skills, memory, project, provider, model, browser, permissionMode, planning = true, subagents = true }) {
+  const notes = [planning ? PLANNING_NOTE : '', subagents ? DELEGATION_NOTE : '', provider?.managed ? LOCAL_NOTE : ''].filter(Boolean);
+  const parts = [[BASE_PROMPT, ...notes].join('\n')];
 
   if (skills) parts.push(skills);
   if (memory) parts.push(memory);
@@ -147,6 +167,9 @@ export class Agent extends EventEmitter {
     // Returns { override, snapshot } for the current session: the user's manual
     // ledger corrections and the counters saved by earlier turns.
     this.liveLedger = null;
+    // Returns the chat's plan when planning is on (null function when off),
+    // so the progress note can suggest a plan for a big task that has none.
+    this.livePlan = null;
   }
 
   /**
@@ -227,9 +250,33 @@ export class Agent extends EventEmitter {
     let roundRetried = false; // overflow-recovery retry used for this round
     const turnStarted = Date.now();
     let totalTokens = 0;
-    let loopGuidance = '';
+    // Three sources can ask the model for something, and a small model given
+    // two instructions follows neither well. Each fills its own slot; the
+    // guidance carries only the highest-priority one as its single "Next"
+    // line: a blocked finish, then a loop hint, then the convergence nudges,
+    // then the ledger's own default.
+    let gateHint = '';
+    let loopHint = '';
     let implementationGuidance = '';
     let forceImplementation = false;
+    let forcedRounds = 0;
+    // Each finish gate may send the model back once per turn, and no more
+    // than two may fire in all. A gate that can fire forever traps a model
+    // that cannot satisfy it (no test exists, the "placeholder" is
+    // legitimate); being bounced four times in a row is little better.
+    const gatesUsed = new Set();
+    const gate = (name) => (gatesUsed.has(name) || gatesUsed.size >= 2 ? false : (gatesUsed.add(name), true));
+    const guidance = () => {
+      const plan = this.livePlan?.();
+      return progressLedgerText(ledger, {
+        next: gateHint || loopHint || implementationGuidance,
+        planning: Boolean(this.livePlan),
+        hasPlan: Boolean(plan?.items?.length),
+      });
+    };
+    const toolsForRound = () => (forceImplementation
+      ? this.schemas.filter((schema) => ['edit_file', 'write_file'].includes(schema?.function?.name))
+      : this.schemas);
     const ledger = createProgressLedger(objectiveFromMessages(messages));
     seedLedger(ledger, this.liveLedger?.()?.snapshot);
     applyLedgerOverride(ledger, this.liveLedger?.()?.override);
@@ -284,12 +331,7 @@ export class Agent extends EventEmitter {
 
         let reply;
         try {
-          reply = await this._stream(
-            messages,
-            sampling,
-            [progressLedgerText(ledger), loopGuidance, implementationGuidance].filter(Boolean).join('\n\n'),
-            forceImplementation ? this.schemas.filter((schema) => ['edit_file', 'write_file'].includes(schema?.function?.name)) : this.schemas,
-          );
+          reply = await this._stream(messages, sampling, guidance(), toolsForRound());
         } catch (err) {
           // Overflow recovery: one compact-and-retry per round. A second
           // rejection means the window genuinely cannot hold the work, and
@@ -298,16 +340,12 @@ export class Agent extends EventEmitter {
             roundRetried = true;
             const result = await this.compact(messages, { manual: false });
             if (!result.compacted) throw err;
-            reply = await this._stream(
-              messages,
-              sampling,
-              [progressLedgerText(ledger), loopGuidance, implementationGuidance].filter(Boolean).join('\n\n'),
-              forceImplementation ? this.schemas.filter((schema) => ['edit_file', 'write_file'].includes(schema?.function?.name)) : this.schemas,
-            );
+            reply = await this._stream(messages, sampling, guidance(), toolsForRound());
           } else {
             throw err;
           }
         }
+        if (forceImplementation) forcedRounds++;
         roundRetried = false;
         this.partial = null; // the round landed whole; nothing left to salvage
         await this._append(messages, reply.message);
@@ -325,31 +363,34 @@ export class Agent extends EventEmitter {
         });
 
         if (!reply.message.tool_calls?.length) {
-          if (forceImplementation && ledger.materialMutations === 0) {
-            const removed = messages.splice(roundStart);
-            if (removed.length) await this.archive?.(removed);
-            implementationGuidance = 'You tried to end an implementation request without changing a file. Discovery is complete. Use edit_file or write_file now to make the smallest justified fix. Do not explain, search, test, or stop before the edit.';
-            this.emit('loop_detected', { round: rounds, reason: 'attempted to finish without implementing', next: 'make the smallest justified file edit', removed: removed.length });
+          // Finish gates: the model tried to end the turn, but the ledger
+          // says the work is not there yet. Each sends it back once, with its
+          // attempted answer set aside: it stays in the chat, in place, but
+          // the model no longer sees it and so does not anchor on it.
+          const sendBack = async (name, hint, detail) => {
+            const removed = setAside(messages, roundStart, 'unfinished');
+            gateHint = hint;
+            this.emit('loop_detected', { round: rounds, kind: 'finish', gate: name, reason: detail.reason, next: detail.next, removed: removed.length });
+            this.emit('transcript', { reason: `gate_${name}` });
             await this.persist?.();
-            continue;
-          }
+          };
           const gaps = completionGaps(ledger);
-          if (ledger.implementation && gaps.length) {
-            const removed = messages.splice(roundStart);
-            if (removed.length) await this.archive?.(removed);
-            implementationGuidance = `You tried to finish while the progress ledger still shows incomplete deliverables: ${gaps.join('; ')}. Replace the placeholder or empty content with the requested real content, then verify the rendered result. Do not claim completion.`;
-            this.emit('loop_detected', { round: rounds, reason: 'attempted to finish with unresolved deliverable gaps', next: 'replace placeholder content and verify the rendered result', removed: removed.length });
-            this.emit('transcript', { reason: 'incomplete_deliverable' });
-            await this.persist?.();
+          if (forceImplementation && ledger.materialMutations === 0 && gate('no_edit')) {
+            await sendBack('no_edit',
+              'You stopped without changing any file, but this task needs a change. Use edit_file or write_file now for the smallest fix the evidence supports. If you truly cannot, say exactly what is blocking you.',
+              { reason: 'tried to finish without changing a file', next: 'make the smallest justified file edit' });
             continue;
           }
-          if (ledger.implementation && ledger.materialMutations > 0 && ledger.verifications === 0) {
-            const removed = messages.splice(roundStart);
-            if (removed.length) await this.archive?.(removed);
-            implementationGuidance = 'You tried to finish after editing without a relevant verification. Run the smallest test, build, or rendered-browser check that exercises the changed deliverable. Research downloads, dev-server startup, and syntax-only narration do not count.';
-            this.emit('loop_detected', { round: rounds, reason: 'attempted to finish without verifying the edited deliverable', next: 'run a relevant test, build, or rendered-browser check', removed: removed.length });
-            this.emit('transcript', { reason: 'unverified_deliverable' });
-            await this.persist?.();
+          if (ledger.implementation && gaps.length && gate('gaps')) {
+            await sendBack('gaps',
+              `You stopped, but these still have placeholder or empty content: ${gaps.join('; ')}. Put the real content in, then check the result. If it cannot be done, say so plainly instead of claiming it is finished.`,
+              { reason: 'tried to finish with placeholder content left', next: 'replace the placeholder content and check it' });
+            continue;
+          }
+          if (ledger.implementation && ledger.materialMutations > 0 && ledger.verifications === 0 && gate('unverified')) {
+            await sendBack('unverified',
+              'You stopped after changing files without checking them. Run the relevant test or build, or open the result in the browser, then report. If there is no way to check it, say so in your answer.',
+              { reason: 'tried to finish without checking the change', next: 'run a relevant test, build or browser check' });
             continue;
           }
           if (
@@ -357,17 +398,11 @@ export class Agent extends EventEmitter {
             && ledger.complexity === 'hard'
             && incompleteCompletion(reply.message.content)
             && (!bounded || rounds < activeRoundLimit())
+            && gate('admitted_gap')
           ) {
-            const removed = messages.splice(roundStart);
-            if (removed.length) await this.archive?.(removed);
-            implementationGuidance = 'You tried to declare a hard task complete while admitting that required data, assets, content, or implementation is still missing. A scaffold is not the requested deliverable. Continue now: use browser_extract on the dynamic source, try the next credible source if needed, populate the real data/assets, and verify the completed result. Do not ask the user to supply information that is available from the sources they named.';
-            this.emit('loop_detected', {
-              round: rounds,
-              reason: 'attempted to finish a hard task with an admitted completion gap',
-              next: 'retrieve and implement the missing required content, then verify the complete result',
-              removed: removed.length,
-            });
-            await this.persist?.();
+            await sendBack('admitted_gap',
+              'Your answer says required content is still missing. Try to get it now (for example browser_extract on the source the user named, or the next reliable source), put it in, and check the result. Ask the user only for what you cannot get yourself.',
+              { reason: 'tried to finish a big task with missing content', next: 'fetch and add the missing content, then check the result' });
             continue;
           }
           // A thinking model can spend a whole round reasoning and emit no
@@ -413,30 +448,41 @@ export class Agent extends EventEmitter {
           ledger: ledgerView(ledger),
         });
 
+        // The model acted, so a finish gate's instruction has been heard.
+        gateHint = '';
+
         const discoveryLimit = budgets.discoveryRounds;
-        if (ledger.implementation && ledger.materialMutations === 0 && discoveryLimit && ledger.rounds >= discoveryLimit) {
-          forceImplementation = true;
-          implementationGuidance = `Discovery budget reached after ${ledger.rounds} rounds with no edit. Using the evidence already gathered, state the cause and minimal plan internally, then use edit_file or write_file on the next action. Discovery tools are now unavailable. Do not stop, search, or run another test before editing.`;
-        } else if (
-          ledger.implementation
-          && ledger.materialMutations === 0
-          && discoveryLimit
-          && ledger.rounds >= Math.max(1, discoveryLimit - 2)
-        ) {
-          implementationGuidance = `Convergence checkpoint: identify the most likely cause from the evidence already gathered and form a minimal edit plan now. At most ${discoveryLimit - ledger.rounds} discovery round(s) remain before the agent must implement. Do not broaden the investigation.`;
-        } else if (ledger.materialMutations > 0) {
+        if (ledger.materialMutations > 0) {
           forceImplementation = false;
-          implementationGuidance = completionGaps(ledger).length
-            ? `Implementation has started, but it is not complete. Resolve these detected gaps before reporting success: ${completionGaps(ledger).join('; ')}.`
-            : ledger.verifications > 0
-              ? 'The deliverable has material edits and a relevant verification. Fix any observed regression or report the completed result plainly.'
-              : 'Implementation has started. Run the smallest relevant verification of the actual deliverable, fix regressions caused by the edit, then report the result.';
+          implementationGuidance = '';
+        } else if (forceImplementation && forcedRounds >= 2) {
+          // Two edit-only rounds without an edit: the model cannot make one
+          // from what it has. Give the tools back rather than trapping it.
+          forceImplementation = false;
+          implementationGuidance = 'If one more targeted read would let you make the fix, do it and then edit. If you cannot make the change, tell the user exactly what is blocking you.';
+        } else if (ledger.creative) {
+          // Painting pixels is progress even before a file exists.
+          implementationGuidance = '';
+        } else if (ledger.implementation && discoveryLimit && ledger.rounds >= discoveryLimit && !forcedRounds) {
+          forceImplementation = true;
+          implementationGuidance = `You have searched for ${ledger.rounds} steps without changing anything. Discovery tools are now unavailable for this step: use edit_file or write_file to make the smallest fix the evidence supports.`;
+        } else if (ledger.implementation && discoveryLimit && !forcedRounds && ledger.rounds >= Math.max(1, discoveryLimit - 2)) {
+          const left = discoveryLimit - ledger.rounds;
+          implementationGuidance = `Decide on the cause now from what you have already found, and plan the smallest edit. ${left > 0 ? `After ${left} more search step${left === 1 ? '' : 's'} you will be asked to edit.` : ''}`.trim();
         }
 
-        if (this.settings.loopDetection !== false && this.reviewProgress && !this.pendingImages.length) {
+        // Loop detection, two levels. An exact repeat (same call, same result)
+        // is certain and cheap: the duplicate is dropped from the model's view,
+        // since the first copy is still there. The model-based progress check
+        // is a judgement, and small models misjudge: it only ever adds a hint
+        // and never removes evidence, and it is skipped for rounds that edited
+        // or checked something, which are progress by definition.
+        loopHint = '';
+        if (this.settings.loopDetection !== false && !this.pendingImages.length) {
           let review = deterministic;
-          const semanticReviewDue = this.stopOnLoop || ledger.rounds % reviewEvery === 0
-            || (ledger.implementation && ledger.materialMutations === 0 && discoveryLimit && ledger.rounds >= discoveryLimit - 1);
+          const productive = observed.mutated || observed.verified;
+          const semanticReviewDue = this.reviewProgress && !productive
+            && (this.stopOnLoop || ledger.rounds % reviewEvery === 0);
           if (!review && semanticReviewDue) {
             try {
               review = await this.reviewProgress({
@@ -452,18 +498,21 @@ export class Agent extends EventEmitter {
             }
           }
           if (review?.loop) {
+            const exact = Boolean(deterministic);
             const strikes = deterministic?.strikes || recordLoop(ledger);
-            const safeToPrune = reply.message.tool_calls.every((call) => !this.tools[call.function.name]?.mutates);
-            const removed = safeToPrune ? messages.splice(roundStart) : [];
-            if (removed.length) await this.archive?.(removed);
-            const escalation = strikes >= 2 ? '\nThis approach has now stalled repeatedly. Do not use it again in this turn.' : '';
-            loopGuidance = `A progress supervisor detected a loop in the previous action and removed that action from your active context. Reason: ${review.reason || 'it did not add new evidence toward the request.'}\nNext action: ${review.next || 'return to the original request, choose one decisive test, then implement or report a precise blocker.'}${escalation}\nDo not repeat or paraphrase the removed action.`;
-            if (!safeToPrune) loopGuidance = loopGuidance.replace(' and removed that action from your active context', '; the action may have had side effects, so its record was retained');
-            this.emit('loop_detected', { round: rounds, reason: review.reason || '', next: review.next || '', removed: removed.length });
-            this.emit('transcript', { reason: 'loop_prune' });
+            const safeToPrune = exact && reply.message.tool_calls.every((call) => !this.tools[call.function.name]?.mutates);
+            const removed = safeToPrune ? setAside(messages, roundStart, 'repeat') : [];
+            const what = exact
+              ? `Your last step repeated an earlier one: ${review.reason}.${removed.length ? ' The duplicate was dropped; the earlier result is still above.' : ''}`
+              : `A progress check found your last step added nothing new${review.reason ? ` (${review.reason})` : ''}.`;
+            const escalation = strikes >= 2 ? ' This approach has stalled more than once, so do not use it again in this turn.' : '';
+            const next = review.next ? review.next.charAt(0).toUpperCase() + review.next.slice(1) : 'Use what you already have and take the next step toward the request.';
+            loopHint = `${what}${escalation} ${next}`;
+            this.emit('loop_detected', { round: rounds, kind: exact ? 'repeat' : 'review', reason: review.reason || '', next: review.next || '', removed: removed.length });
+            if (removed.length) this.emit('transcript', { reason: 'loop_prune' });
             await this.persist?.();
             if (this.stopOnLoop) {
-              const note = `Research handed back to the parent after the progress supervisor detected no useful progress. ${review.reason ? `Reason: ${review.reason}. ` : ''}${review.next ? `Recommended next action: ${review.next}.` : ''}`.trim();
+              const note = `Research handed back to the parent after the progress check found no useful progress. ${review.reason ? `Reason: ${review.reason}. ` : ''}${review.next ? `Recommended next action: ${review.next}.` : ''}`.trim();
               await this._append(messages, { role: 'assistant', content: note });
               this.emit('done', {
                 rounds,
@@ -473,9 +522,8 @@ export class Agent extends EventEmitter {
               });
               return messages;
             }
-            continue;
+            if (removed.length) continue;
           }
-          loopGuidance = '';
         }
 
         // Hand over any screenshots the tools produced, as a user turn --
@@ -525,7 +573,7 @@ export class Agent extends EventEmitter {
 
   /** Estimated size of the next request: transcript plus tool schemas. */
   requestTokens(messages) {
-    return estimateTokens(messages) + (this.schemasTokens || 0);
+    return estimateTokens(modelView(messages)) + (this.schemasTokens || 0);
   }
 
   /**
@@ -590,7 +638,7 @@ export class Agent extends EventEmitter {
     // trace grows with the input — so the retry halves the input instead of
     // pointlessly asking again with the same one.
     for (let attempt = 0; attempt < 2 && !summary; attempt++) {
-      const truncated = truncateForSummary(head, {
+      const truncated = truncateForSummary(modelView(head), {
         contextTokens: window,
         reserve: cfg.reserve,
         summaryMaxTokens: cfg.summaryMaxTokens,
@@ -686,21 +734,45 @@ export class Agent extends EventEmitter {
   }
 
   async _invoke(call) {
-    const name = call.function.name;
-    const tool = this.tools[name];
-    if (!tool) return { content: `Error: no tool named "${name}".`, ok: false };
+    let name = call.function.name;
+    let tool = this.tools[name];
+    if (!tool) {
+      const { exact, suggestions } = suggestToolName(name, Object.keys(this.tools));
+      if (!exact) {
+        return {
+          content:
+            `Error: no tool named "${name}".` +
+            (suggestions.length ? ` Did you mean ${suggestions.map((s) => `"${s}"`).join(' or ')}?` : '') +
+            ` Available tools: ${Object.keys(this.tools).join(', ')}.`,
+          ok: false,
+        };
+      }
+      // readFile, read-file, READ_FILE: only the spelling is off. Run the real
+      // tool, and correct the call in the transcript so the model's own
+      // history shows it the right name from here on.
+      name = exact;
+      tool = this.tools[exact];
+      call.function.name = exact;
+    }
 
     let args = {};
     if (call.function.arguments?.trim()) {
       try {
         args = JSON.parse(call.function.arguments);
       } catch (err) {
-        // Small models sometimes emit not-quite-JSON. Say so precisely so the
-        // model can correct itself next round.
-        return {
-          content: `Error: arguments were not valid JSON (${err.message}). Received: ${call.function.arguments.slice(0, 300)}`,
-          ok: false,
-        };
+        // Arguments that bypassed the provider's repair (an old transcript,
+        // say) get the same lenient reading before being refused.
+        const fixed = looseToolArguments(call.function.arguments);
+        if (!fixed) {
+          // Small models sometimes emit not-quite-JSON. Say so precisely so the
+          // model can correct itself next round.
+          return {
+            content: `Error: arguments were not valid JSON (${err.message}). Received: ${call.function.arguments.slice(0, 300)}`,
+            ok: false,
+          };
+        }
+        args = fixed;
+        call.function.arguments = JSON.stringify(fixed);
       }
       // Arguments that were already unparseable when they arrived: the text is
       // kept inside legal JSON so the transcript stays replayable. Report it
@@ -778,13 +850,15 @@ export class Agent extends EventEmitter {
     this.abortController = new AbortController();
     const partial = { content: '', reasoning: '' };
     this.partial = partial;
+    // Plan and pinned requirements first, the progress note (with its single
+    // "Next" line) last: the end of the prompt is what a small model weighs most.
     const live = this.liveGuidance?.() || '';
-    const combinedGuidance = [guidance, live].filter(Boolean).join('\n\n');
+    const combinedGuidance = [live, guidance].filter(Boolean).join('\n\n');
     const result = await streamCompletion(
       this.provider,
       {
         model: this.model,
-        messages: combinedGuidance ? [...messages, { role: 'system', content: combinedGuidance }] : messages,
+        messages: combinedGuidance ? [...modelView(messages), { role: 'system', content: combinedGuidance }] : modelView(messages),
         tools: schemas,
         sampling,
       },

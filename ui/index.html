@@ -50,6 +50,8 @@
   <symbol id="i-mute" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.2h2.3L8.6 3.4v9.2L5.3 9.8H3Z"/><path d="M11 6.4l3.2 3.2M14.2 6.4 11 9.6"/></symbol>
   <symbol id="i-terminal" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.4"/><path d="M4.6 6.4 6.8 8.4l-2.2 2M8.6 11h3"/></symbol>
   <symbol id="i-list" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></symbol>
+  <symbol id="i-checklist" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.2 4.1l1.3 1.3 2.2-2.4M2.2 10.6l1.3 1.3 2.2-2.4M8.3 4.4h5.5M8.3 10.9h5.5"/></symbol>
+  <symbol id="i-progress" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="3" cy="12.5" r="1.6"/><circle cx="8" cy="8" r="1.6"/><circle cx="13" cy="3.5" r="1.6"/><path d="M4.2 11.4l2.6-2.3M9.2 6.9l2.6-2.3"/></symbol>
   <symbol id="i-dots" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.2" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.8" cy="8" r="1.3"/></symbol>
   <symbol id="i-edit" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.2 2.8a1.8 1.8 0 0 1 2.5 2.5L5.4 13.6l-3.3.9.9-3.3Z"/></symbol>
   <symbol id="i-eye" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M1.8 8S4 4.2 8 4.2 14.2 8 14.2 8 12 11.8 8 11.8 1.8 8 1.8 8Z"/><circle cx="8" cy="8" r="1.8"/></symbol>
@@ -172,6 +174,11 @@
         <p class="empty-copy">Confirm the workspace below, then describe the outcome you want.</p>
         <div class="readiness" id="readiness" aria-label="Chat readiness"></div>
       </div>
+    </div>
+    <!-- Shown when you scroll up while the agent writes: the chat stops
+         following new text until you come back down or press this. -->
+    <div class="jump-anchor">
+      <button type="button" class="jump-latest" id="jumpLatest" hidden><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg>Jump to latest</button>
     </div>
 
     <section class="turn-status" id="turnStatus" role="status" aria-live="polite" hidden>
@@ -334,8 +341,8 @@
     </header>
     <nav class="tool-tabs" id="toolTabs" aria-label="Workspace tool">
       <button type="button" class="active" data-tool="tasks" aria-label="Tasks" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg><span>Tasks</span><span class="tool-tab-count" id="taskTabCount" aria-hidden="true" hidden></span></button>
-      <button type="button" data-tool="plan" aria-label="Plan" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-list"/></svg><span>Plan</span><span class="tool-tab-count" id="planTabCount" aria-hidden="true" hidden></span></button>
-      <button type="button" data-tool="ledger" aria-label="Ledger" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>Ledger</span><span class="tool-tab-count" id="ledgerTabCount" aria-hidden="true" hidden></span></button>
+      <button type="button" data-tool="plan" aria-label="Plan" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-checklist"/></svg><span>Plan</span><span class="tool-tab-count" id="planTabCount" aria-hidden="true" hidden></span></button>
+      <button type="button" data-tool="ledger" aria-label="Progress" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-progress"/></svg><span>Progress</span><span class="tool-tab-count warn" id="ledgerTabCount" aria-hidden="true" hidden></span></button>
       <button type="button" data-tool="review" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-diff"/></svg><span>Review</span></button>
       <button type="button" data-tool="files" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>Files</span></button>
       <button type="button" data-tool="ai" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg><span>Local AI</span></button>
@@ -348,27 +355,37 @@
         </section>
       </section>
       <section class="tool-pane plan-pane" data-tool-pane="plan" hidden aria-labelledby="planHeading">
-        <header class="plan-head">
-          <div>
-            <h2 id="planHeading">Execution plan</h2>
-            <p id="planSummary">The agent will create a plan for substantial work.</p>
+        <header class="pane-head">
+          <div class="pane-head-text">
+            <h2 id="planHeading">Plan</h2>
+            <p id="planSummary">A checklist the agent keeps for bigger tasks.</p>
           </div>
-          <button type="button" class="btn tiny" id="planAdd"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add step</button>
+          <div class="pane-head-actions">
+            <button type="button" class="btn" id="planAdd"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add step</button>
+            <button type="button" class="icon-btn" id="planClear" title="Clear the whole plan" aria-label="Clear the whole plan"><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg></button>
+          </div>
         </header>
-        <div class="plan-live" id="planLive" role="status" aria-live="polite"></div>
+        <div class="plan-progress" id="planProgress" hidden>
+          <div class="plan-progress-bar" aria-hidden="true"><span id="planProgressFill"></span></div>
+          <span id="planProgressText"></span>
+        </div>
+        <div class="visually-hidden" id="planLive" role="status" aria-live="polite"></div>
         <ol class="plan-list" id="planList"></ol>
         <div class="plan-undo" id="planUndo" hidden>
           <span id="planUndoText">Step deleted.</span>
-          <button type="button" class="btn tiny" id="planUndoButton">Undo</button>
+          <button type="button" class="btn" id="planUndoButton">Undo</button>
         </div>
+        <p class="pane-foot" id="planFoot">The agent re-reads this plan before every step, so your edits apply straight away. Click a circle to tick a step off.</p>
       </section>
       <section class="tool-pane ledger-pane" data-tool-pane="ledger" hidden aria-labelledby="ledgerHeading">
-        <header class="plan-head">
-          <div>
-            <h2 id="ledgerHeading">Progress ledger</h2>
-            <p id="ledgerSummary">What the agent is told about its own progress each round.</p>
+        <header class="pane-head">
+          <div class="pane-head-text">
+            <h2 id="ledgerHeading">Progress</h2>
+            <p id="ledgerSummary">What Skadi has seen the agent do, and what it tells the model before each step.</p>
           </div>
-          <button type="button" class="btn tiny" id="ledgerReset" title="Clear your corrections and the saved counters">Reset</button>
+          <div class="pane-head-actions">
+            <button type="button" class="btn" id="ledgerReset" title="Forget the saved progress and your notes for this chat"><svg class="icon" aria-hidden="true"><use href="#i-restart"/></svg>Start over</button>
+          </div>
         </header>
         <div id="ledgerBody"></div>
       </section>
@@ -390,113 +407,144 @@
 
     <section class="tool-pane local-ai-pane" data-tool-pane="ai" hidden>
     <div class="tool-pane-title"><h2>Local AI</h2><span class="status-label">local</span></div>
-    <p class="local-ai-intro">Load as many models as your GPU holds. Each chat picks which one answers.</p>
+
+    <!-- Every panel here folds: click its header. Which ones are open is
+         remembered per browser (see wireAiPanels in app.js). -->
 
     <!-- What is running now: one card per loaded model, each with its own Eject. -->
-    <section class="panel loaded-panel">
+    <section class="panel loaded-panel" data-fold="loaded">
       <header class="panel-head">
-        <h2>Loaded models</h2><span class="count" id="loadedCount"></span>
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+        <h2>Loaded</h2><span class="count" id="loadedCount"></span>
         <button class="btn tiny danger" id="btnEjectAll" hidden title="Unload every model Skadi started">Eject all</button>
       </header>
-      <div class="loaded-list" id="loadedList"></div>
-    </section>
-
-    <!-- Sharing: who outside the machine may talk to the loaded models, and with which keys. -->
-    <section class="panel share-panel">
-      <header class="panel-head">
-        <h2>Share</h2><span class="count" id="shareKeyCount"></span>
-      </header>
-      <div class="share-endpoint">
-        <code id="shareEndpointUrl">http://127.0.0.1:7799/v1</code>
-        <button class="icon-btn" id="btnShareCopy" title="Copy this address"><svg class="icon"><use href="#i-copy"/></svg></button>
+      <div class="fold-body">
+        <div class="loaded-list" id="loadedList"></div>
       </div>
-      <p class="hint">Skadi listens on the port below on every interface. Open that TCP port on your router and allow it in Windows Firewall, then hand this address and a key to a friend. Only <code>/v1/*</code> lives on that port.</p>
-      <div class="share-create">
-        <input type="text" id="shareKeyLabel" class="share-key-label" placeholder="Who is it for?" aria-label="Key label" maxlength="40" spellcheck="false">
-        <button class="btn tiny" id="btnShareKey"><svg class="icon"><use href="#i-key"/></svg>Create key</button>
-      </div>
-      <div class="share-fresh" id="shareFresh" hidden></div>
-      <div class="share-keys" id="shareKeys"></div>
     </section>
 
     <!-- Model first, then the settings to load it with. -->
-    <section class="panel load-panel">
+    <section class="panel load-panel" data-fold="load">
       <header class="panel-head">
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
         <h2>Load a model</h2>
-        <button class="btn models-btn" id="btnModels" title="Download models from Hugging Face, browse tested profiles, and see what fits your GPU"><svg class="icon"><use href="#i-download"/></svg>Browse models</button>
+        <button class="btn tiny models-btn" id="btnModels" title="Find and download models on Hugging Face"><svg class="icon"><use href="#i-download"/></svg>Get models</button>
       </header>
-      <select id="loadModel" aria-label="Model to load"></select>
-      <div class="load-label" id="loadSettingsLabel">Settings</div>
-      <div class="load-profiles" id="loadProfiles" role="radiogroup" aria-labelledby="loadSettingsLabel"></div>
-      <div class="load-links" id="loadLinks"></div>
-      <button class="btn models-btn load-go" id="btnLoad">Load</button>
-      <p class="hint" id="loadHint"></p>
+      <div class="fold-body">
+        <select id="loadModel" aria-label="Model to load"></select>
+        <div class="load-label" id="loadSettingsLabel">Profile</div>
+        <div class="load-profiles" id="loadProfiles" role="radiogroup" aria-labelledby="loadSettingsLabel"></div>
+        <div class="load-links" id="loadLinks"></div>
+        <button class="btn models-btn load-go" id="btnLoad">Load</button>
+        <p class="hint" id="loadHint"></p>
+      </div>
     </section>
 
-    <section class="panel shots-panel">
-      <header class="panel-head"><h2>Screenshots</h2></header>
-      <div class="shot-strip" id="shotStrip"></div>
-      <p class="hint">Captures the agent took with <code>browser_screenshot</code>. With a vision model it sees these too and can click by coordinate.</p>
-    </section>
-
-    <section class="panel local-only">
+    <section class="panel local-only" data-fold="profile">
       <header class="panel-head">
-        <h2>Profile</h2>
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+        <h2>Profile settings</h2>
         <button class="icon-btn" id="btnLoadModel" title="New profile with default settings"><svg class="icon"><use href="#i-plus"/></svg></button>
-        <button class="icon-btn" id="btnDuplicateProfile" title="Duplicate this profile into an editable copy"><svg class="icon"><use href="#i-copy"/></svg></button>
+        <button class="icon-btn" id="btnDuplicateProfile" title="Duplicate into an editable copy"><svg class="icon"><use href="#i-copy"/></svg></button>
         <button class="icon-btn" id="btnDeleteProfile" title="Delete this profile"><svg class="icon"><use href="#i-trash"/></svg></button>
       </header>
-      <div class="profile-name" id="profileName"></div>
-      <div class="lock-note temp-note" id="profileTemp" hidden>
-        <svg class="icon"><use href="#i-warn"/></svg>
-        <span>These are default settings, made for this load. They go when the model is ejected unless you save them.</span>
-        <button type="button" class="btn tiny" id="btnSaveProfile">Save profile</button>
+      <div class="fold-body">
+        <div class="profile-name" id="profileName"></div>
+        <div class="lock-note temp-note" id="profileTemp" hidden>
+          <svg class="icon"><use href="#i-warn"/></svg>
+          <span>Unsaved defaults &mdash; gone on eject.</span>
+          <button type="button" class="btn tiny" id="btnSaveProfile">Save</button>
+        </div>
+        <div class="lock-note" id="profileLock" hidden>
+          <svg class="icon"><use href="#i-lock"/></svg>
+          <span>Read-only catalog profile</span>
+          <button type="button" class="btn tiny" id="btnUnlockProfile" title="Make an editable copy">Duplicate</button>
+        </div>
+        <div class="model-line" id="modelLine"></div>
+        <div class="settings" id="settings"></div>
+        <div class="profile-foot">
+          <button id="btnRestart" class="btn"><svg class="icon"><use href="#i-restart"/></svg>Apply &amp; restart</button>
+        </div>
       </div>
-      <div class="lock-note" id="profileLock" hidden>
-        <svg class="icon"><use href="#i-lock"/></svg>
-        <span>Skadi catalog profile, tuned for <b id="profileLockVram">16 GB</b> of VRAM. It can't be edited &mdash; duplicate it to make a copy you can change.</span>
-      </div>
-      <div class="model-line" id="modelLine"></div>
-      <div class="settings" id="settings"></div>
-      <div class="profile-foot">
-        <button id="btnRestart" class="btn"><svg class="icon"><use href="#i-restart"/></svg>Apply &amp; restart</button>
-      </div>
-      <p class="hint">Changes save and re-forecast immediately. They reach the model when you press <em>Apply &amp; restart</em>.</p>
     </section>
 
-    <section class="panel local-only">
-      <header class="panel-head"><h2>Forecast</h2><span class="tag" id="estApprox" hidden>approximate</span></header>
-      <table class="kv" id="estimateTable"></table>
-      <div class="callout" id="verdict"></div>
-      <div class="fit-row">
-        <button id="btnFit" class="btn">Fit to VRAM</button>
-        <span class="hint" id="fitHint"></span>
-      </div>
-      <p class="hint" id="estNotes"></p>
-    </section>
-
-    <section class="panel">
-      <header class="panel-head collapse" data-toggle="skadiSettings">
-        <h2>Skadi settings</h2>
-        <svg class="icon chevron"><use href="#i-chevron"/></svg>
+    <section class="panel local-only" data-fold="forecast">
+      <header class="panel-head">
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+        <h2>Forecast</h2><span class="tag" id="estApprox" hidden>approximate</span>
       </header>
-      <div class="settings" id="skadiSettings" hidden></div>
+      <div class="fold-body">
+        <table class="kv" id="estimateTable"></table>
+        <div class="callout" id="verdict"></div>
+        <div class="fit-row">
+          <button id="btnFit" class="btn">Fit to VRAM</button>
+          <span class="hint" id="fitHint"></span>
+        </div>
+        <p class="hint" id="estNotes"></p>
+      </div>
     </section>
 
-    <section class="panel local-only">
-      <header class="panel-head"><h2>GPU memory</h2><span class="count" id="vramTotal"></span></header>
-      <div class="vram-bar" id="vramBar">
-        <div class="seg llama" id="segLlama"></div>
-        <div class="seg others" id="segOthers"></div>
+    <section class="panel local-only" data-fold="vram">
+      <header class="panel-head">
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+        <h2>GPU memory</h2><span class="count" id="vramTotal"></span>
+      </header>
+      <div class="fold-body">
+        <div class="vram-bar" id="vramBar">
+          <div class="seg llama" id="segLlama"></div>
+          <div class="seg others" id="segOthers"></div>
+        </div>
+        <dl class="legend">
+          <div><dt><i class="sw llama"></i>llama-server</dt><dd id="vramLlama">—</dd></div>
+          <div><dt><i class="sw others"></i>everything else</dt><dd id="vramOthers">—</dd></div>
+          <div><dt><i class="sw free"></i>free</dt><dd id="vramFree">—</dd></div>
+        </dl>
+        <div class="callout bad" id="spill" hidden>
+          <svg class="icon"><use href="#i-warn"/></svg>
+          <span><span id="spillLead">Spilling </span><b id="spillAmount"></b><span id="spillText"> into system RAM — decode speed will drop hard.</span></span>
+        </div>
       </div>
-      <dl class="legend">
-        <div><dt><i class="sw llama"></i>llama-server</dt><dd id="vramLlama">—</dd></div>
-        <div><dt><i class="sw others"></i>everything else</dt><dd id="vramOthers">—</dd></div>
-        <div><dt><i class="sw free"></i>free</dt><dd id="vramFree">—</dd></div>
-      </dl>
-      <div class="callout bad" id="spill" hidden>
-        <svg class="icon"><use href="#i-warn"/></svg>
-        <span><span id="spillLead">Spilling </span><b id="spillAmount"></b><span id="spillText"> into system RAM — decode speed will drop hard.</span></span>
+    </section>
+
+    <!-- Sharing: who outside the machine may talk to the loaded models, and with which keys. -->
+    <section class="panel share-panel" data-fold="share" data-fold-default="closed">
+      <header class="panel-head">
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+        <h2>Share</h2><span class="count" id="shareKeyCount"></span>
+      </header>
+      <div class="fold-body">
+        <div class="share-endpoint">
+          <code id="shareEndpointUrl">http://127.0.0.1:7799/v1</code>
+          <button class="icon-btn" id="btnShareCopy" title="Copy this address"><svg class="icon"><use href="#i-copy"/></svg></button>
+        </div>
+        <p class="hint" title="Skadi listens on this port on every interface, and only /v1/* is served there.">Open this port on your router and firewall, then give a friend the address and a key.</p>
+        <div class="share-create">
+          <input type="text" id="shareKeyLabel" class="share-key-label" placeholder="Who is it for?" aria-label="Key label" maxlength="40" spellcheck="false">
+          <button class="btn tiny" id="btnShareKey"><svg class="icon"><use href="#i-key"/></svg>Create key</button>
+        </div>
+        <div class="share-fresh" id="shareFresh" hidden></div>
+        <div class="share-keys" id="shareKeys"></div>
+      </div>
+    </section>
+
+    <section class="panel shots-panel" data-fold="shots" data-fold-default="closed">
+      <header class="panel-head">
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+        <h2>Screenshots</h2>
+      </header>
+      <div class="fold-body">
+        <div class="shot-strip" id="shotStrip"></div>
+        <p class="hint">What the agent captured with <code>browser_screenshot</code>.</p>
+      </div>
+    </section>
+
+    <section class="panel" data-fold="skadi" data-fold-default="closed">
+      <header class="panel-head">
+        <svg class="icon fold-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+        <h2>Skadi settings</h2>
+      </header>
+      <div class="fold-body">
+        <div class="settings" id="skadiSettings"></div>
       </div>
     </section>
 
@@ -530,17 +578,17 @@
     <header class="modal-head">
       <h2 id="modelsTitle">Models</h2>
       <div class="mm-tabs" role="tablist" aria-label="Model source">
-        <button type="button" role="tab" data-tab="discover" aria-selected="false">Hugging Face</button>
+        <button type="button" role="tab" data-tab="discover" aria-selected="true" class="active">Hugging Face</button>
         <button type="button" role="tab" data-tab="catalog" aria-selected="false">Skadi catalog</button>
-        <button type="button" role="tab" data-tab="installed" aria-selected="true" class="active">Installed</button>
+        <button type="button" role="tab" data-tab="installed" aria-selected="false">Installed<span class="mm-tab-count" id="mmInstalledCount"></span></button>
       </div>
       <span class="spacer"></span>
       <button class="icon-btn" id="modelsClose" title="Close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
     </header>
     <div class="mm-body">
-      <section class="mm-pane" id="mm-installed"></section>
+      <section class="mm-pane" id="mm-installed" hidden></section>
       <section class="mm-pane" id="mm-catalog" hidden></section>
-      <section class="mm-pane" id="mm-discover" hidden>
+      <section class="mm-pane" id="mm-discover">
         <div class="mm-search">
           <svg class="icon"><use href="#i-search"/></svg>
           <input type="text" id="mmQuery" placeholder="Search models, or paste a Hugging Face link" spellcheck="false" autocomplete="off">
@@ -553,7 +601,7 @@
         </div>
         <div class="mm-split">
           <div class="mm-results" id="mmResults"></div>
-          <div class="mm-detail" id="mmDetail"></div>
+          <div class="mm-detail" id="mmDetail"><p class="mm-hint mm-pick">Pick a model to see its files and what fits your GPU.</p></div>
         </div>
       </section>
     </div>

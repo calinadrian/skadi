@@ -57,7 +57,10 @@ test('implementation phases advance from discovery through edit and verification
   assert.equal(ledger.phase, 'verify');
   observeToolRound(ledger, [call('run_command', { command: 'npm test' })], [{ ok: true, content: 'pass' }]);
   assert.equal(ledger.phase, 'complete');
-  assert.match(progressLedgerText(ledger), /material deliverable edits: 1; valid post-edit verification actions: 1/i);
+  const text = progressLedgerText(ledger);
+  assert.match(text, /changed 1 project file; 1 passing check/);
+  assert.match(text, /Stage: Done/);
+  assert.match(text, /Next: .*tell the user what you changed/);
 });
 
 test('task sizing keeps a small fix tight and gives a researched website room', () => {
@@ -144,11 +147,11 @@ test('a compacted transcript still yields the implementation objective', () => {
 
 test('the ledger text says an unedited implementation is not complete', () => {
   const ledger = createProgressLedger('Fix the broken images on the site.');
-  assert.doesNotMatch(progressLedgerText(ledger), /NOT complete/);
+  assert.doesNotMatch(progressLedgerText(ledger), /Not done yet/);
   ledger.rounds = 3;
-  assert.match(progressLedgerText(ledger), /NOT complete: no deliverable file has been edited/);
+  assert.match(progressLedgerText(ledger), /Not done yet: no project file has been changed/);
   ledger.materialMutations = 1;
-  assert.doesNotMatch(progressLedgerText(ledger), /NOT complete/);
+  assert.doesNotMatch(progressLedgerText(ledger), /Not done yet/);
 });
 
 test('words like todo in test output or diffs do not raise a rendered-output gap', () => {
@@ -184,4 +187,14 @@ test('saved counters seed a new run of the same objective only', () => {
   const snapshot = ledgerSnapshot(first);
   assert.equal(seedLedger(createProgressLedger('Fix the prune bug in edits.'), snapshot).materialMutations, 1);
   assert.equal(seedLedger(createProgressLedger('Add a dark theme.'), snapshot).materialMutations, 0);
+});
+
+test('the progress note ends with exactly one instruction, and a caller can replace it', () => {
+  const ledger = createProgressLedger('Build a TFT website from scratch using current patch data, real icons, and multiple pages.');
+  const first = progressLedgerText(ledger, { planning: true, hasPlan: false });
+  assert.match(first, /Next: This is a bigger task\. First write a short plan/);
+  assert.doesNotMatch(progressLedgerText(ledger, { planning: false }), /update_plan/, 'never suggest a tool that is not offered');
+  const replaced = progressLedgerText(ledger, { next: 'Edit index.html now.' });
+  assert.equal((replaced.match(/^Next:/gm) || []).length, 1);
+  assert.match(replaced, /Next: Edit index\.html now\.$/);
 });

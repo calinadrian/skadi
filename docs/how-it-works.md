@@ -15,6 +15,7 @@ agent and its tools behave, and where everything lives.
 - [Attachments](#attachments)
 - [Speed](#speed)
 - [Skills](#skills)
+- [Pixel art](#pixel-art)
 - [Memory](#memory)
 - [Context compaction](#context-compaction)
 - [Settings](#settings)
@@ -325,10 +326,25 @@ prefill latency is not counted against decode speed.
 ---
 name: vram-tuning
 description: How to fit a GGUF model into 16 GB of VRAM without spilling.
+triggers: vram|out of memory|won'?t fit
 ---
 
-...instructions...
+## Quick start
+...the few steps a small model needs...
+
+...full instructions...
 ```
+
+`triggers` is optional: a pattern matched against each request. When it
+matches, the skill's **Quick start** section is handed to the model at once,
+once per chat, instead of waiting for it to call `load_skill` (small models
+often don't). **Settings → Skills → Load matching skills automatically** turns
+this off.
+
+Skills that ship with Skadi stay up to date: an installed copy you never edited
+is replaced when the app ships a newer version, while one you edited is left
+alone and marked **Edited** in Settings, with a **Restore** button to go back
+to the built-in version.
 
 Only the name and description go into the system prompt. The body is fetched
 with the `load_skill` tool when the model judges it relevant. That matters more
@@ -340,6 +356,37 @@ Click a skill in the rail to read and edit it, or **＋** to write a new one
 (name, one-line description, Markdown body). Renaming moves the
 `skills/<name>/SKILL.md` directory; deleting removes it. What you save is
 exactly what the model will load next session.
+
+## Pixel art
+
+Ask for pixel art, sprites, icons, tiles, 8-bit or retro graphics and the
+agent gets five extra tools for that turn (they are left out otherwise, to keep
+small models' tool lists short), plus the `pixel-art` skill's quick start:
+
+- `pixel_new` — a named canvas (up to 256×256) with a palette: a preset
+  (`sweetie-16`, `pico-8`, `endesga-32`, `earth`, `gameboy`, `grayscale`)
+  or up to 36 hex colours. `from` copies a canvas for the next animation frame.
+- `pixel_draw` — many operations per call: shapes, lines, flood fill, dithered
+  gradients, noise and Voronoi texture, plus one-call `outline`, `shade`
+  (light from the top-left), `mirror` (symmetry), `stamp` (compose sprites)
+  and `text` (a 3×5 pixel font). Argument names are forgiving, and a bad
+  operation is skipped with its reason rather than failing the call.
+- `pixel_view` — the canvas as a compact character grid (one character per
+  pixel), the colours used, and suggestions (missing outline, flat areas,
+  art touching the edge). Vision models also get the rendered picture.
+- `pixel_export` — a PNG in the project, and the HTML, CSS and canvas code to
+  show it sharply (`image-rendering: pixelated`, no smoothing). `frames`
+  packs an animation sprite sheet with a CSS `steps()` snippet; `tileset`
+  makes the 16 autotile edge variants of a tile; `data_uri` returns an
+  inline image for single-file pages.
+- `pixel_import` — loads an existing PNG to edit, shrinking upscaled art
+  back to its real pixels.
+
+The canvas is shown in the chat as it is painted. Canvases are kept per chat
+in `pixel/`. The drawing approach — an agent placing palette-indexed pixels
+with tools and checking a text grid, rather than a diffusion model — and the
+autotile generator come from Texel Studio by Emir Yaman Sivrikaya,
+https://github.com/EYamanS/texel-studio, reimplemented dependency-free.
 
 ## Memory
 
@@ -404,20 +451,45 @@ while the summary streams. Tune it in
 }
 ```
 
-## Live execution plans
+## Plans
 
-For medium and large implementation turns, the main agent publishes a short
-execution plan before it starts changing files. The **Plan** workspace tab shows
-which step is working, what is queued, blocked, ready for review, done or skipped.
-The agent updates the same plan through the `update_plan` tool as work advances.
+For bigger tasks the agent may keep a short checklist (3-6 steps) with the
+`update_plan` tool, shown in the **Plan** workspace tab. The tool is built for
+small local models: steps are referred to by number
+(`{"action":"status","step":2,"status":"done"}`), common spellings such as
+`in_progress` or `completed` are understood, and finishing a step starts the
+next one automatically. A request that cannot be applied (a step that does not
+exist, a step the user skipped) is answered with a plain explanation and the
+current plan, never an error in the chat.
 
-The plan is also a control surface for the user. Step text can be edited inline;
-steps can be inserted, reordered with drag or keyboard-accessible arrow buttons,
-skipped through the status picker, or deleted and restored with **Undo**. User
-changes are persisted immediately and steered into a running turn at the next
-safe model boundary. Once a user has changed a plan, a later agent update cannot
-silently replace it, rewrite user-authored step text, or revive a skipped step.
-Only one step may be marked **Working** at a time.
+The plan is also a control surface for the user. Click a step's circle to tick
+it off; edit its text inline; reorder with drag or the arrow buttons; change its
+status; delete and **Undo**; or clear the whole plan. Edits are saved at once and
+re-read into the model's guidance before its next step, so no message is
+injected into the chat. Once a user has changed a plan, a later agent update
+cannot replace it, rewrite user-written steps, or revive a skipped step. Only
+one step is current at a time. **Settings → Agent → Plan checklist** turns the
+tool off entirely for models that spend too many steps on bookkeeping.
+
+## Progress
+
+Every model request ends with a short progress note that Skadi builds from the
+agent's own tool results: the task, the stage (Find > Understand > Change >
+Check > Done), what it has looked at, changed and checked, any placeholder
+content still left, and one `Next:` line. Several parts of Skadi can want
+something from the model at once (a loop hint, a blocked finish, a nudge to
+stop searching and edit); only the most important reaches that single line, so
+a small model is never handed two instructions that pull in different ways.
+
+The **Progress** workspace tab shows the same record in plain words. From there
+the user can mark a detected problem as **Not a problem**, leave a note the
+model reads before every step, or **Start over** to forget the saved progress.
+
+If the model tries to finish while the record says the work is not there
+(nothing changed, the change never checked, placeholder content left), it is
+sent back once per reason and at most twice per turn; after that its answer
+stands. A sent-back answer stays in the chat, marked as set aside, but is no
+longer shown to the model.
 
 ## Subagents and loop recovery
 
@@ -434,21 +506,24 @@ semantic supervisor detects that a read-only child has stopped making useful
 progress, the child returns its evidence and recommended next action to the
 parent instead of starting another research round.
 
-Loop recovery is semantic rather than based on elapsed time or a magic call
-count. After a tool step, a lightweight supervisor compares the new evidence
-with the current user request and recent evidence. If the step repeated known
-work, retried without adapting, or wandered off the direct path, the supervisor
-returns one concrete redirect. Read-only loop steps are archived for the saved
-chat but removed from the model's active context; steps that may have side
-effects remain in context so the model never forgets a possible mutation.
-Malformed or unavailable supervisor output fails open and the parent continues
-normally. **Emergency tool ceiling** remains available as an optional fallback,
+Loop recovery works on two levels. An exact repeat (the same call returning
+the same result) is caught every step: the duplicate stays in the chat, marked,
+but is hidden from the model, since the first copy is still there. Every few
+steps (**Progress check every**) the same model is also asked a yes/no
+question: did the last step add anything? Small models misjudge this, so the
+answer only ever adds a one-line hint to the progress note; it never removes
+evidence, and steps that edited or checked something are never questioned. The
+check runs without thinking by default, and malformed or unavailable output
+fails open. Each intervention appears in the chat as a short note, so it is
+clear why the agent changed course. **Emergency tool ceiling** remains available as an optional fallback,
 but `0` disables it and relies on semantic recovery.
 
 ## Settings
 
-The gear button in the top bar opens settings: sections on the
-left, controls on the right, everything applied immediately.
+The gear button in the top bar opens settings. The menu on the left groups
+pages under General, Model, Agent, Knowledge and System; each page opens with a
+sentence on what it is for, and everything applies immediately. The search box
+finds any setting by name or description.
 
 - **Model** — active provider, endpoint (editable for API providers; the local
   one is managed by Skadi), model id, API key, API sampling temperature, and
@@ -512,12 +587,16 @@ the agent feeds into `read_file` as an explicit numbered range. Large source
 files therefore stay inspectable without dumping them into model context;
 returned excerpts remain capped at 30,000 characters.
 
-`web_search` uses DuckDuckGo by default, with no API key or account. In
-**Settings → Agent**, it can instead use the JSON API of a self-hosted SearXNG
-instance. Both backends return compact titles, source URLs and snippets.
-Enable **Run SearXNG with Skadi** to have the app launch a private local
-`searxng/searxng` Docker container on startup and stop it on shutdown. The first
-start downloads the image; the feature stays completely off until enabled.
+`web_search` uses DuckDuckGo by default, with no API key or account.
+**Settings → Web search → Private search with SearXNG** runs SearXNG natively
+on this machine instead — no Docker. The first time it is switched on, Skadi
+finds Python 3.10 or newer, downloads SearXNG into `searxng/`, makes a virtual
+environment and installs its packages (a minute or two); after that, on and off
+just start and stop it on 127.0.0.1. The status row shows each step, and
+**Reinstall** starts over from scratch. Until SearXNG answers — or if it fails —
+searches quietly use DuckDuckGo. If you already run SearXNG elsewhere, put its
+address in **Your own SearXNG server** instead. Both backends return compact
+titles, source URLs and snippets.
 The globe button in the composer controls whether `web_search` is available in
 that chat. The choice is stored with the session, and the button is locked while
 a turn is running so its tool set cannot change halfway through the loop.

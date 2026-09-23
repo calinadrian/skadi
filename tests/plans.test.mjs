@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { applyPlanAction, normalisePlan, planPrompt } from '../src/plans.mjs';
+import { applyPlanAction, normalisePlan, planPrompt, planStatus, PlanNotice } from '../src/plans.mjs';
 import { buildTools } from '../src/tools.mjs';
 import { Skadi } from '../src/server.mjs';
 
@@ -67,8 +67,9 @@ test('normalisation bounds persisted plan data and live guidance is explicit', (
   });
   assert.equal(plan.revision, 0);
   assert.deepEqual(plan.items.map((item) => item.text), ['Work carefully']);
-  assert.match(planPrompt(plan), /\[working\] Work carefully/);
-  assert.match(planPrompt(plan), /Never perform skipped or deleted work/);
+  assert.match(planPrompt(plan), /1\. \[now\] Work carefully/);
+  assert.match(planPrompt(plan), /You are on step 1/);
+  assert.match(planPrompt(plan), /Never do skipped work/);
 });
 
 test('update_plan is available only when the parent supplies a plan callback', async () => {
@@ -80,11 +81,11 @@ test('update_plan is available only when the parent supplies a plan callback', a
   assert.ok(parent.update_plan);
   const result = await parent.update_plan.run({ action: 'add', text: 'A step' });
   assert.deepEqual(request, { action: 'add', text: 'A step' });
-  assert.match(result, /"revision": 1/);
+  assert.match(result, /^Plan saved/);
   assert.equal(buildTools({ workspace: process.cwd(), settings: {}, tasks: null }).update_plan, undefined);
 });
 
-test('a user plan edit mutates the live session, persists, broadcasts, and steers safely', async () => {
+test('a user plan edit mutates the live session, persists and broadcasts without a fake user message', async () => {
   const session = { id: 'chat-1', messages: [], plan: normalisePlan() };
   const events = [];
   const steers = [];
@@ -101,7 +102,7 @@ test('a user plan edit mutates the live session, persists, broadcasts, and steer
   assert.equal(plan.userEdited, true);
   assert.equal(saved, 1);
   assert.equal(events[0].type, 'session_plan');
-  assert.match(steers[0], /edited by the user/);
+  assert.deepEqual(steers, [], 'the plan reaches the model through the live guidance, not the transcript');
 });
 
 test('the Workspace exposes an accessible editable Plan surface', async () => {
@@ -113,9 +114,50 @@ test('the Workspace exposes an accessible editable Plan surface', async () => {
   assert.match(html, /data-tool="plan"/);
   assert.match(html, /id="planList"/);
   assert.match(html, /role="status" aria-live="polite"/);
-  assert.match(js, /Move \$\{item\.text\} up/);
+  assert.match(js, /Move step \$\{number\} up/);
+  assert.match(js, /Mark step \$\{number\} as done/);
+  assert.match(js, /quiet\(/, 'plan edits report problems as toasts, not chat errors');
   assert.match(js, /action, \.\.\.extra/);
   assert.match(js, /planAction\('restore'/);
   assert.match(css, /\.plan-item\.status-working/);
   assert.match(css, /@media \(max-width: 520px\)/);
+});
+
+test('small-model spellings: step numbers, status synonyms and auto-advance', () => {
+  let plan = applyPlanAction(null, { action: 'set', steps: ['Find the bug', 'Fix it', 'Run the tests'] }, { makeId: ids });
+  assert.equal(plan.items[0].status, 'working', 'a fresh agent plan starts on step 1');
+  plan = applyPlanAction(plan, { action: 'status', step: 1, status: 'completed' });
+  assert.equal(plan.items[0].status, 'done');
+  assert.equal(plan.items[1].status, 'working', 'finishing a step starts the next one');
+  plan = applyPlanAction(plan, { action: 'status', itemId: '#2', status: 'in_progress' });
+  assert.equal(plan.items[1].status, 'working');
+  plan = applyPlanAction(plan, { action: 'status', itemId: 'Run the tests', status: 'pending' });
+  assert.equal(plan.items[2].status, 'queued');
+  assert.equal(planStatus('Not Started'), 'queued');
+  assert.equal(planStatus('nonsense'), '');
+});
+
+test('agent conflicts are notices carrying the current plan, not raw errors', async () => {
+  let plan = applyPlanAction(null, { action: 'set', steps: ['One', 'Two'] }, { makeId: ids });
+  assert.throws(() => applyPlanAction(plan, { action: 'status', step: 9, status: 'done' }), (err) => {
+    assert.ok(err instanceof PlanNotice);
+    assert.match(err.message, /steps are numbered 1-2/);
+    assert.equal(err.plan.items.length, 2);
+    return true;
+  });
+  plan = applyPlanAction(plan, { action: 'status', step: 2, status: 'skipped' }, { source: 'user' });
+  const tools = buildTools({ workspace: process.cwd(), settings: {}, tasks: null, updatePlan: async (request) => applyPlanAction(plan, request) });
+  const result = await tools.update_plan.run({ action: 'status', step: 2, status: 'done' });
+  assert.match(result, /^Plan not changed: the user skipped step 2/);
+  assert.match(result, /2\. \[skipped\] Two \(from the user\)/);
+});
+
+test('only the user can clear a plan, which hands it back to the agent', () => {
+  let plan = applyPlanAction(null, { action: 'set', steps: ['One'] }, { source: 'user', makeId: ids });
+  assert.throws(() => applyPlanAction(plan, { action: 'clear' }), PlanNotice);
+  plan = applyPlanAction(plan, { action: 'clear' }, { source: 'user' });
+  assert.equal(plan.items.length, 0);
+  assert.equal(plan.userEdited, false);
+  plan = applyPlanAction(plan, { action: 'set', steps: ['Fresh'] }, { makeId: ids });
+  assert.equal(plan.items[0].text, 'Fresh');
 });
