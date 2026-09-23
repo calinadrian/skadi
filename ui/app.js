@@ -2886,7 +2886,58 @@ function renderModelMenu() {
 
   if (!cur.hasKey) {
     const note = el('div', 'menu-note warn');
-    note.append(el('span', null, `${cur.label} has no credential yet, so a message would fail. Add one in Settings → Model & provider.`));
+    note.append(el('span', null, `${cur.label} has no credential yet, so a message would fail.`));
+    const form = el('div', 'menu-key-form');
+    const urlInput = el('input', 'menu-key-input');
+    urlInput.type = 'text';
+    urlInput.placeholder = `${cur.label} endpoint URL`;
+    urlInput.value = cur.baseUrl || '';
+    urlInput.autocomplete = 'off';
+    urlInput.spellcheck = false;
+    urlInput.title = 'Pointing this at someone else’s shared Skadi? Paste the address they gave you here.';
+    const keyInput = el('input', 'menu-key-input');
+    keyInput.type = 'password';
+    keyInput.placeholder = `${cur.label} API key`;
+    keyInput.autocomplete = 'off';
+    keyInput.spellcheck = false;
+    const save = el('button', 'btn tiny', 'Save');
+    save.type = 'button';
+    const trySave = async () => {
+      const apiKey = keyInput.value.trim();
+      const baseUrl = urlInput.value.trim();
+      if (!apiKey && baseUrl === (cur.baseUrl || '')) return;
+      save.disabled = true;
+      urlInput.disabled = true;
+      keyInput.disabled = true;
+      try {
+        let r;
+        if (baseUrl && baseUrl !== cur.baseUrl) {
+          r = await api('provider/endpoint', { id: cur.id, baseUrl });
+          state.providers = r.providers;
+        }
+        if (apiKey) {
+          r = await api('provider/key', { id: cur.id, apiKey });
+          state.providers = r.providers;
+        }
+        // Credentials just changed: a cached failure (e.g. the 401 from
+        // before this key existed) must not keep showing for up to 5 minutes.
+        modelLists.delete(cur.id);
+        renderModelMenu();
+      } catch (err) {
+        save.disabled = false;
+        urlInput.disabled = false;
+        keyInput.disabled = false;
+        note.append(el('div', 'menu-key-error', err.message));
+      }
+    };
+    const onEnter = (e) => { if (e.key === 'Enter') trySave(); };
+    urlInput.addEventListener('keydown', onEnter);
+    keyInput.addEventListener('keydown', onEnter);
+    save.onclick = trySave;
+    const keyRow = el('div', 'menu-key-row');
+    keyRow.append(keyInput, save);
+    form.append(urlInput, keyRow);
+    note.append(form);
     menu.append(note);
   }
 
