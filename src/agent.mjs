@@ -766,7 +766,7 @@ export class Agent extends EventEmitter {
     this.emit('tool_call', { id: call.id, name, args });
     const startedAt = Date.now();
     try {
-      const content = await tool.run(args, { callId: call.id });
+      const content = await tool.run(args, { callId: call.id, signal: this.abortController?.signal });
       return { content: String(content), ok: true, ms: Date.now() - startedAt };
     } catch (err) {
       const message = err instanceof ToolError ? err.message : `${err.name}: ${err.message}`;

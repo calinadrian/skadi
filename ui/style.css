@@ -283,6 +283,16 @@ body {
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn.tiny { height: 24px; padding: 3px 9px; font-size: 11.5px; }
+.btn.models-btn {
+  height: 30px;
+  padding: 6px 13px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.btn.models-btn:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 
 .icon-btn {
   display: inline-flex;
@@ -3715,6 +3725,18 @@ a.mm-link { width: fit-content; }
 .panel-head .count + .btn.tiny { margin-left: 8px; }
 .panel-head .btn.tiny .icon { width: 12px; height: 12px; margin-right: 5px; }
 
+.share-endpoint { display: flex; align-items: center; gap: 6px; margin: 2px 0 0; }
+.share-endpoint code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
+.share-create { display: flex; gap: 6px; margin-top: 10px; }
+.share-key-label { flex: 1; min-width: 0; }
+.share-fresh { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.share-fresh-box { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--accent-edge); border-radius: 6px; background: var(--accent-tint); }
+.share-fresh-label { font-size: 11.5px; color: var(--text-faint); }
+.share-fresh-key { font-size: 13px; word-break: break-all; }
+.share-keys { display: grid; gap: 6px; margin-top: 10px; }
+.share-key-row { display: flex; align-items: center; gap: 8px; border: 1px solid var(--accent-edge); border-radius: 6px; padding: 6px 8px; }
+.share-key-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.share-key-sub { font-size: 11px; color: var(--text-faint); }
 .loaded-list { display: grid; gap: 6px; }
 .loaded-empty { margin: 0; padding: 4px 2px 2px; color: var(--text-faint); font-size: 12.5px; }
 .loaded-card {

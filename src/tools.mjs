@@ -13,6 +13,21 @@ import { createInterface } from 'node:readline';
 import { unifiedDiff, statLine } from './diff.mjs';
 import { ROOT } from './config.mjs';
 
+/**
+ * Kill a spawned shell and whatever it started. `child.kill()` alone only
+ * signals powershell.exe/cmd.exe itself -- a grandchild it launched (e.g.
+ * `Start-Process node ...`, or a detached dev server) is not part of that
+ * process and survives, becoming an orphan that keeps a port bound.
+ */
+function killTree(child) {
+  if (!child.pid) return;
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+  } else {
+    child.kill();
+  }
+}
+
 const MAX_READ_BYTES = 256 * 1024;
 const MAX_OUTPUT_CHARS = 30000;
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.venv', '__pycache__', '.next']);
@@ -515,7 +530,7 @@ export function buildTools(ctx) {
           required: ['command'],
         },
       },
-      async run({ command, shell, background }, meta) {
+      async run({ command, shell, background }, meta = {}) {
         const priv = privateCommandHit(command, ctx.workspace);
         if (priv) {
           const name = dirName(priv);
@@ -561,7 +576,7 @@ export function buildTools(ctx) {
           let out = '';
           const append = (d) => {
             out += d;
-            if (out.length > MAX_OUTPUT_CHARS * 2) child.kill();
+            if (out.length > MAX_OUTPUT_CHARS * 2) killTree(child);
           };
           child.stdout.setEncoding('utf8');
           child.stderr.setEncoding('utf8');
@@ -569,16 +584,27 @@ export function buildTools(ctx) {
           child.stderr.on('data', append);
 
           const timer = setTimeout(() => {
-            child.kill();
+            killTree(child);
             out += `\n[harness] killed after ${timeoutSec}s`;
           }, timeoutSec * 1000);
 
+          // Stop must be immediate even while a command is running: without
+          // this, aborting the turn only stopped the agent loop, leaving the
+          // child (and this promise) running until the timeout above fired.
+          const onAbort = () => {
+            killTree(child);
+            out += '\n[harness] stopped by user';
+          };
+          meta.signal?.addEventListener('abort', onAbort);
+
           child.on('error', (err) => {
             clearTimeout(timer);
+            meta.signal?.removeEventListener('abort', onAbort);
             resolvePromise(`[harness] failed to start: ${err.message}`);
           });
           child.on('close', async (code) => {
             clearTimeout(timer);
+            meta.signal?.removeEventListener('abort', onAbort);
             const base = `exit code ${code}\n${out.trim() || '(no output)'}`;
             let changes = [];
             if (before) {

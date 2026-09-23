@@ -3119,6 +3119,8 @@ const INSTANCE_STATE_LABEL = { starting: 'Loading…', ready: 'Ready', error: 'F
 
 /** Everything that shows which models are loaded: the pill, the cards, the Load area, the chip. */
 function renderInstances() {
+  // The Share panel shows how many models the proxy can serve; keep it in step with the instance list.
+  refreshShare().catch(() => {});
   const all = [...state.instances.values()];
   const live = all.filter((i) => i.state === 'ready' || i.state === 'starting' || i.state === 'external');
 
@@ -3177,7 +3179,7 @@ function renderLoadedList(all) {
     if (inst.state === 'error' && inst.lastError) main.append(el('span', 'loaded-error', inst.lastError.slice(0, 420)));
     main.onclick = () => { if (!inst.external) guard(() => selectProfile(inst.id))(); };
 
-    const eject = el('button', 'btn tiny loaded-eject', inst.state === 'error' ? 'Dismiss' : 'Eject');
+    const eject = el('button', 'btn tiny loaded-eject danger', inst.state === 'error' ? 'Dismiss' : 'Eject');
     eject.type = 'button';
     if (inst.external) {
       eject.disabled = true;
@@ -3210,6 +3212,94 @@ function renderLoadedList(all) {
     }
     list.append(card);
     renderLoadedFacts(inst);
+  }
+}
+
+// ---------------------------------------------------------- sharing
+
+const share = { status: null, keys: [], fresh: null };
+
+async function refreshShare() {
+  try {
+    const [status, { keys }] = await Promise.all([api('share/status'), api('share/keys')]);
+    share.status = status;
+    share.keys = keys;
+  } catch {
+    share.status = null;
+  }
+  renderShare();
+}
+
+function renderShare() {
+  const port = share.status?.port;
+  $('shareEndpointUrl').textContent = port ? `http://YOUR-PUBLIC-IP:${port}/v1` : 'start Skadi to get a share port';
+  $('shareKeyCount').textContent = share.keys.length ? String(share.keys.length) : '';
+
+  const fresh = $('shareFresh');
+  fresh.replaceChildren();
+  if (share.fresh) {
+    const box = el('div', 'share-fresh-box');
+    box.append(el('span', 'share-fresh-label', 'Shown once — copy it now:'));
+    const key = el('code', 'share-fresh-key');
+    key.textContent = share.fresh; // direct: el() would redact the credential
+    const copy = el('button', 'btn tiny', 'Copy key');
+    copy.type = 'button';
+    copy.onclick = guard(async () => { await copyText(share.fresh); toast('Key copied.'); });
+    box.append(key, copy);
+    const dismiss = el('button', 'icon-btn');
+    dismiss.type = 'button';
+    dismiss.title = 'Dismiss';
+    dismiss.append(icon('x'));
+    dismiss.onclick = () => { share.fresh = null; renderShare(); };
+    fresh.append(box, dismiss);
+    fresh.hidden = false;
+  } else {
+    fresh.hidden = true;
+  }
+
+  const list = $('shareKeys');
+  list.replaceChildren();
+  if (!share.keys.length) {
+    list.append(el('p', 'hint', 'No keys yet — create one and hand it to a friend.'));
+    return;
+  }
+  for (const k of share.keys) {
+    const row = el('div', 'share-key-row');
+    const meta = el('span', 'share-key-meta');
+    meta.append(
+      el('span', null, k.label || 'shared key'),
+      el('span', 'share-key-sub', `${k.prefix} · ${new Date(k.createdAt).toLocaleDateString()}`),
+    );
+    row.append(meta);
+    const revoke = el('button', 'btn tiny danger', 'Revoke');
+    revoke.type = 'button';
+    revoke.title = 'This key stops working immediately';
+    revoke.onclick = guard(async () => {
+      revoke.disabled = true;
+      try {
+        await api(`share/keys/${k.id}/revoke`, {});
+        share.keys = share.keys.filter((x) => x.id !== k.id);
+        if (share.status) share.status.keys = share.keys.length;
+        renderShare();
+      } finally {
+        revoke.disabled = false;
+      }
+    });
+    row.append(revoke);
+    list.append(row);
+  }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const input = document.createElement('input');
+    input.value = text;
+    document.body.append(input);
+    input.select();
+    document.execCommand('copy');
+    input.remove();
   }
 }
 
@@ -4869,6 +4959,7 @@ function connect() {
   es.addEventListener('measured', () => selectProfile(state.editing));
   es.addEventListener('download', (e) => onDownloadEvent(JSON.parse(e.data).job));
   es.addEventListener('models_changed', () => refreshModels());
+  es.addEventListener('share_status', (e) => { share.status = JSON.parse(e.data); renderShare(); });
   // Profiles came or went on the server -- a model's default settings were
   // dropped on eject, or saved. Take its word for what exists now.
   es.addEventListener('profiles_changed', async (e) => {
@@ -5245,6 +5336,25 @@ function tickLiveRate() {
 const guard = (fn) => async (...args) => {
   try { await fn(...args); } catch (err) { addMessage('error', err.message); }
 };
+
+$('btnShareCopy').onclick = guard(async () => {
+  await copyText($('shareEndpointUrl').textContent);
+  toast('Address copied.');
+});
+$('btnShareKey').onclick = guard(async () => {
+  const label = $('shareKeyLabel').value.trim();
+  $('btnShareKey').disabled = true;
+  try {
+    const { key } = await api('share/keys', { label });
+    share.fresh = key;
+    $('shareKeyLabel').value = '';
+    await refreshShare();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    $('btnShareKey').disabled = false;
+  }
+});
 
 $('btnRestart').onclick = guard(() => api('server/restart', { profileId: state.editing }));
 $('btnFit').onclick = guard(async () => {
@@ -7243,7 +7353,9 @@ function settingPatch(path, value) {
 
 /** Apply the active UI theme to <html>. 'oled' is pure black (OLED-friendly); anything else is polar. */
 function applyTheme() {
-  document.documentElement.dataset.theme = (state.settings && state.settings.theme) === 'oled' ? 'oled' : 'polar';
+  const theme = (state.settings && state.settings.theme) === 'oled' ? 'oled' : 'polar';
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('skadi.theme', theme); } catch {} // remembered by the <head> script for the next open
 }
 
 let settingsRows = [];

@@ -23,6 +23,7 @@ skadi.listen(port);
 
 const url = `http://127.0.0.1:${port}`;
 console.log(`skadi  ->  ${url}`);
+console.log(`share API ->  http://127.0.0.1:${skadi.sharing.port}/v1  (API keys; open this port on your router to share it)`);
 console.log(`workspace ->  ${settings.workspace}`);
 console.log('Ctrl+C to stop (this also stops llama-server if the skadi started it).');
 

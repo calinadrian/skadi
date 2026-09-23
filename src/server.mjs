@@ -2,6 +2,7 @@
 // VRAM samples, llama-server logs and agent output to the browser. No framework,
 // no websockets -- SSE is one-way and that is all the UI needs.
 import { createServer } from 'node:http';
+import { Sharing } from './sharing.mjs';
 import { spawn } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, writeFileSync, openSync } from 'node:fs';
@@ -346,6 +347,13 @@ export class Skadi {
     // mistaken for, or leak cookies into, another chat's.
     this.browsers = new Map();       // key -> AgentBrowser
     this.browserClients = new Map(); // key -> Set<res>
+
+    // Sharing the loaded model outside the machine: OpenAI-style keys plus a
+    // proxy on the share port, the one surface bound outside loopback; an
+    // experienced user opens that port on their router and shares their IP.
+    this.sharing = new Sharing(this);
+    this.sharing.on('status', (status) => this.broadcast('share_status', status));
+    this.sharing.on('error', (err) => console.error('[share]', err.message));
     // A llama-server Skadi did not start, already listening on our port
     // -- e.g. one launched from the old Start-*.ps1 scripts. We attach to it
     // for chat, but we must not claim to own it or try to stop it.
@@ -3550,7 +3558,11 @@ export class Skadi {
 
   async updateStatus({ force = false, passive = false } = {}) {
     const installed = await installedVersion();
-    if (passive && this.settings.updateCheck === false) {
+    // A passive read never checks GitHub or broadcasts: it only reports
+    // whatever the last active check found. Broadcasting here would let the
+    // client's 'update' SSE listener re-trigger this same passive call,
+    // looping forever.
+    if (passive) {
       return {
         enabled: true,
         installable: this.canInstallUpdates(),
@@ -3602,11 +3614,13 @@ export class Skadi {
     this.vram.start();
     this.startUpdateChecks();
     this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
+    this.sharing.start();
     const server = createServer((req, res) => {
       const url = new URL(req.url, `http://${req.headers.host}`);
       if (url.pathname === '/api/events') return this.handleEvents(req, res);
       if (url.pathname === '/api/browser/stream') return this.handleBrowserStream(req, res, url);
       if (url.pathname === '/api/shot') return this.handleShot(req, res, url);
+      if (url.pathname.startsWith('/api/share')) return this.sharing.handle(req, res, url);
       if (url.pathname.startsWith('/api/')) return this.handleApi(req, res, url);
       return this.handleStatic(req, res, url);
     });
@@ -3624,6 +3638,7 @@ export class Skadi {
   }
 
   async shutdown() {
+    await this.sharing.stop().catch(() => {});
     this.vram.stop();
     await this.localSearxng.stop();
     await Promise.all([...this.browsers.values()].map((b) => b.close().catch(() => {})));

@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Skadi</title>
+<script>
+  // Apply the saved theme before first paint so the page never flashes the default.
+  try { document.documentElement.dataset.theme = localStorage.getItem('skadi.theme') === 'oled' ? 'oled' : 'polar'; } catch {}
+</script>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -392,22 +396,40 @@
     <section class="panel loaded-panel">
       <header class="panel-head">
         <h2>Loaded models</h2><span class="count" id="loadedCount"></span>
-        <button class="btn tiny" id="btnEjectAll" hidden title="Unload every model Skadi started">Eject all</button>
+        <button class="btn tiny danger" id="btnEjectAll" hidden title="Unload every model Skadi started">Eject all</button>
       </header>
       <div class="loaded-list" id="loadedList"></div>
+    </section>
+
+    <!-- Sharing: who outside the machine may talk to the loaded models, and with which keys. -->
+    <section class="panel share-panel">
+      <header class="panel-head">
+        <h2>Share</h2><span class="count" id="shareKeyCount"></span>
+      </header>
+      <div class="share-endpoint">
+        <code id="shareEndpointUrl">http://127.0.0.1:7799/v1</code>
+        <button class="icon-btn" id="btnShareCopy" title="Copy this address"><svg class="icon"><use href="#i-copy"/></svg></button>
+      </div>
+      <p class="hint">Skadi listens on the port below on every interface. Open that TCP port on your router and allow it in Windows Firewall, then hand this address and a key to a friend. Only <code>/v1/*</code> lives on that port.</p>
+      <div class="share-create">
+        <input type="text" id="shareKeyLabel" class="share-key-label" placeholder="Who is it for?" aria-label="Key label" maxlength="40" spellcheck="false">
+        <button class="btn tiny" id="btnShareKey"><svg class="icon"><use href="#i-key"/></svg>Create key</button>
+      </div>
+      <div class="share-fresh" id="shareFresh" hidden></div>
+      <div class="share-keys" id="shareKeys"></div>
     </section>
 
     <!-- Model first, then the settings to load it with. -->
     <section class="panel load-panel">
       <header class="panel-head">
         <h2>Load a model</h2>
-        <button class="btn tiny" id="btnModels" title="Download models from Hugging Face, browse tested profiles, and see what fits your GPU"><svg class="icon"><use href="#i-download"/></svg>Browse models</button>
+        <button class="btn models-btn" id="btnModels" title="Download models from Hugging Face, browse tested profiles, and see what fits your GPU"><svg class="icon"><use href="#i-download"/></svg>Browse models</button>
       </header>
       <select id="loadModel" aria-label="Model to load"></select>
       <div class="load-label" id="loadSettingsLabel">Settings</div>
       <div class="load-profiles" id="loadProfiles" role="radiogroup" aria-labelledby="loadSettingsLabel"></div>
       <div class="load-links" id="loadLinks"></div>
-      <button class="btn primary load-go" id="btnLoad">Load</button>
+      <button class="btn models-btn load-go" id="btnLoad">Load</button>
       <p class="hint" id="loadHint"></p>
     </section>
 
