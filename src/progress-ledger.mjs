@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 const MUTATION_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'memory_write', 'skill_write', 'pixel_export']);
-const VERIFICATION_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_console', 'browser_read', 'task_log', 'pixel_view']);
+const VERIFICATION_TOOLS = new Set(['browser_snapshot', 'browser_wait', 'browser_screenshot', 'browser_console', 'browser_read', 'task_log', 'pixel_view']);
 const DISCOVERY_TOOLS = new Set(['grep', 'glob', 'list_dir', 'read_file', 'web_search', 'browser_extract', 'memory_search', 'skill_read', 'load_skill']);
 // Drawing on a pixel canvas is real work that has not reached a file yet: it
 // must never count as "searching without editing".

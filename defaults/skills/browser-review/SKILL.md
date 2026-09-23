@@ -1,109 +1,95 @@
 ---
 name: browser-review
-description: Drive Skadi's embedded browser to check your own UI work — open a page, read it, click it, screenshot it, check the console.
-triggers: in the browser|screenshot|open the page|test the (page|site|ui|game)|check (how it looks|the page|the site)|does it (look|work) right
+description: Use the built-in browser to open a page, click, type, and check that it works — for testing your own UI or using any website.
+triggers: browser|web ?page|website|localhost|screenshot|open the page|click (on|the)|fill (in|out) the|test the (page|site|ui|app|game)|check (how it looks|the page|the site)|does it (look|work) right
 ---
 
-# Reviewing your work in the browser
+# Using the browser
 
-Skadi embeds a real Chromium, driven over the DevTools Protocol and mirrored in
-its own window. The user watches the same page you are driving.
-
-The viewport is fixed at **1280×800**. This matters: screenshot pixels and click
-coordinates are the same coordinate space, so a point you identify in an image is
-a point you can click.
+You drive a real browser. The user watches the same page.
 
 ## Quick start
 
-1. Make the change with the file tools.
-2. Make sure something is serving the page. If a dev server is not already
-   running, start it so the call returns — for example
-   `Start-Process npm -ArgumentList 'run','dev'`. A plain `npm run dev` never
-   exits and will hit the command timeout.
-3. `browser_open` the URL — or the local file path, if there is nothing to serve.
-4. `browser_console` with `errors_only: true`. Do this **first**. A page that
-   threw during render can still look plausible in a screenshot.
-5. `browser_read` to confirm the expected text and structure actually rendered.
-6. `browser_screenshot` so the user can see it.
-7. Report what you saw: "no console errors, the heading reads 'Dashboard',
-   the three cards render". Fix and repeat if anything is wrong.
+Every browser tool answers with the page as a numbered list:
 
-A single HTML file needs no server: skip step 2 and `browser_open` its full
-path, e.g. `C:/Users/me/site/index.html`.
+```
+Page: "Login" — http://localhost:5173/
+Elements (use the number with browser_click / browser_type):
+[1] textbox "Email"
+[2] textbox "Password"
+[3] button "Sign in"
+[4] link "Forgot password?" -> /reset
+Text: Login Email Password Sign in Forgot password?
+```
 
-## Opening local files
+To act on something, use its **number**:
 
-A static page does not need a server. `browser_open` takes three things:
+- `browser_click` `{"target": "3"}`
+- `browser_type` `{"target": "1", "text": "me@example.com"}`
 
-- a URL — `http://localhost:5173`, `https://example.com`;
-- a `file://` URL — `file:///C:/Users/me/site/index.html`;
-- a plain local path — `C:\Users\me\site\index.html`, or
-  `C:/Users/me/site/index.html`, or `/srv/www/index.html`.
+The visible text also works: `{"target": "Sign in"}`.
 
-A plain path is resolved and percent-encoded for you, so spaces and other
-awkward characters need no escaping — write the path as it appears on disk.
-Relative paths are not accepted; give the full one.
+After every action you get the new list. **Read it.** It tells you whether
+the action worked. Numbers change when the page changes, so always use the
+numbers from the **latest** list.
 
-Prefer `file://` for a standalone HTML file you just wrote, and a dev server for
-anything that needs one. Under `file://` the page's origin is opaque, so
-`fetch()` of sibling files, ES module imports and anything gated on CORS will
-fail there even though the same page works when served. If you see that, serve
-the directory instead of blaming the markup.
+## Tools
 
-Step 2 of the quick start is about serving; skip it when you are opening a file
-directly.
+| Tool | Use it to | Example |
+|---|---|---|
+| `browser_open` | open a page | `{"url": "http://localhost:5173"}` |
+| `browser_snapshot` | look at the page again | `{}` |
+| `browser_click` | click a button, link, checkbox | `{"target": "3"}` |
+| `browser_type` | type in a field, or pick a dropdown option | `{"target": "1", "text": "hello", "submit": true}` |
+| `browser_press` | press a key | `{"key": "Escape"}` |
+| `browser_scroll` | see more of the page | `{"to": "down"}` |
+| `browser_wait` | wait for something slow | `{"text": "Saved"}` |
+| `browser_console` | read JavaScript errors | `{"errors_only": true}` |
+| `browser_screenshot` | show the user the page | `{}` |
+| `browser_read` | read all the page text | `{}` |
 
-## Clicking
+`browser_open` also takes a file path (`C:/site/index.html`) or the words
+`back`, `forward`, `reload`.
 
-Two ways, and the right one depends on what you know.
+`browser_type` clears the field first. `"submit": true` presses Enter after
+typing, for search boxes and login forms.
 
-**By selector** — `browser_click` with a CSS selector. Use this whenever you know
-the markup, because it is precise and does not depend on layout.
+## Recipe: check a page you built
 
-**By coordinate** — `browser_click_at` with x and y. Use this when you are
-working from what the page *looks like* rather than from its source. Get the
-coordinates from:
+1. `browser_open` the page. For a single HTML file, use its full path.
+   For an app, start the dev server in the background first.
+2. `browser_console` with `{"errors_only": true}`.
+3. Read the list. Is the text you expect there?
+4. Click or type through the main thing the page does. Read each answer.
+5. `browser_screenshot` so the user can see it.
+6. Report what you saw: "No console errors. The heading says 'Dashboard'.
+   Clicking Add put a new row in the table."
 
-- a screenshot, if you can view images — read the point straight off the picture;
-- `browser_elements` otherwise, which lists every visible clickable element with
-  its label and centre point, like `(412,288) <button> Save changes`.
+If something is wrong: fix the file, then `browser_open` with `reload`,
+and check again.
 
-`browser_elements` is how you click accurately without vision. Do not guess
-coordinates from a description of the page.
+## Recipe: fill in a form
 
-After any click, call `browser_read` or `browser_console` to confirm what
-changed. A click that silently did nothing looks identical to one that worked.
+1. `browser_type` each field by its number.
+2. `browser_click` the submit button, or use `"submit": true` on the last field.
+3. Read the answer: an error message, or a new page?
 
-## Typing
+## When something goes wrong
 
-`browser_type` sends keystrokes to whatever has focus, so click the field first.
-Pass `press` to follow with a key: `{"text": "hello", "press": "Enter"}`.
-`browser_fill` is the selector-based alternative and fires `input` and `change`,
-so frameworks notice it.
-
-## Seeing
-
-If the status line says you cannot view images, a screenshot is still worth
-taking — the user sees it — but do not claim to have looked at it. Verify with
-`browser_read`, `browser_elements` and `browser_console`, and say that is what
-you did.
-
-If you can view images, the screenshot comes back on your next round and you may
-reason about layout, spacing, alignment and colour from it. That is also when
-`browser_click_at` is at its most useful.
-
-## Other tools
-
-- `browser_scroll` moves the page; content below the fold is not in the
-  screenshot or in `browser_elements` until you scroll to it.
-- `browser_eval` answers precise questions an image cannot:
-  `getComputedStyle(document.querySelector('.card')).backgroundColor`,
-  `document.querySelectorAll('.row').length`.
+- **"No element [N]"**: the page changed. Call `browser_snapshot` and use the
+  new numbers.
+- **"Nothing matches"**: use a number from the list instead of text.
+- **"is not a text field"**: you tried to type into a button. Click it instead.
+- **The element you need is not in the list**: `browser_scroll` `{"to": "down"}`
+  and look again. Items marked `(below, scroll down)` can be clicked directly.
+- **A dialog is open**: the list says so. Handle it first, or press Escape.
+- **Nothing happened after a click**: check `browser_console` for errors.
 
 ## Rules
 
-- Re-open the page after changing source. There is no hot-reload guarantee.
-- Check the console after every interaction, not only after loading.
-- `http://`, `https://` and `file://` all work. See "Opening local files".
-- Report what you observed. "The console is clean and the heading reads
-  'Dashboard'" is a finding. "It looks correct" is not.
+- Never guess. If you are not sure what is on the page, call `browser_snapshot`.
+- Do not click the same thing twice in a row. If it did not work the first
+  time, read the list and try something else.
+- Report only what the tools showed you. "It looks correct" is not a finding.
+- If you cannot see images, do not say you looked at a screenshot.
+- Do not type passwords, card numbers or other secrets. Ask the user to do it.

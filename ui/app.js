@@ -809,10 +809,12 @@ function toolLabel(name, args) {
     case 'grep': return { verb: 'Searched for', target: clipText(String(args?.pattern ?? ''), 60) };
     case 'browser_open': return { verb: 'Opened a page', target: args?.url || '' };
     case 'browser_screenshot': return { verb: 'Took a screenshot' };
-    case 'browser_click': case 'browser_click_at': return { verb: 'Clicked in the page', target: args?.selector || args?.text || '' };
-    case 'browser_type': case 'browser_fill': return { verb: 'Typed in the page', target: clipText(String(args?.selector ?? ''), 50) };
-    case 'browser_scroll': return { verb: 'Scrolled the page' };
-    case 'browser_read': case 'browser_elements': return { verb: 'Read the page' };
+    case 'browser_click': case 'browser_click_at': return { verb: 'Clicked in the page', target: clipText(String(args?.target ?? args?.selector ?? args?.text ?? ''), 50) };
+    case 'browser_type': return { verb: 'Typed in the page', target: clipText(String(args?.text ?? ''), 50) };
+    case 'browser_press': return { verb: 'Pressed a key', target: args?.key || '' };
+    case 'browser_scroll': return { verb: 'Scrolled the page', target: args?.to || '' };
+    case 'browser_wait': return { verb: 'Waited for the page', target: args?.text || '' };
+    case 'browser_read': case 'browser_snapshot': return { verb: 'Read the page' };
     case 'browser_extract': return { verb: 'Extracted page data' };
     case 'browser_console': return { verb: 'Read the browser console' };
     case 'browser_eval': return { verb: 'Ran page script' };
@@ -7814,12 +7816,14 @@ function renderEmptyReadiness() {
   const mode = MODES.find((m) => m.value === currentMode());
   const item = (label, value, ready = true) => {
     const row = el('div', `readiness-item ${ready ? 'ready' : 'attention'}`);
+    row.title = `${label}: ${value}`;
     row.append(icon(ready ? 'check' : 'warn'), el('span', null, label), el('strong', null, value));
     return row;
   };
   box.replaceChildren(
     item('Project', project?.name || 'Choose a project', Boolean(project)),
-    item('Model', modelReady ? (provider?.model || provider?.label || 'Ready') : 'Load a model', modelReady),
+    // Local model ids are file names: drop the folder and .gguf so the name fits.
+    item('Model', modelReady ? (String(provider?.model || provider?.label || 'Ready').split(/[\\/]/).pop().replace(/\.gguf$/i, '')) : 'Load a model', modelReady),
     item('Permissions', mode?.label || 'Ask before changes'),
   );
 }

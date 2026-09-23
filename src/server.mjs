@@ -2085,7 +2085,9 @@ export class Skadi {
     if (room.works && !project) throw new Error('Pick a project for this room first.');
     this.mission.patchAgent(id, { room: room.id, projectId: project?.id ?? agent.projectId ?? null, note: room.works ? 'Starting…' : 'On break' });
     if (!room.works) return;
-    const minutes = Math.max(0, Math.min(240, Number(budget.minutes) || 0));
+    // Development has no clock: it ends when every ticket is reported, and the
+    // loop stop in the agent ends a run that stalls.
+    const minutes = room.id === 'development' ? 0 : Math.max(0, Math.min(240, Number(budget.minutes) || 0));
     const target = Math.max(0, Math.min(50, Math.round(Number(budget.target) || 0)));
     // "Work on" names the tickets; otherwise take the project's approved queue.
     const only = Array.isArray(budget.ticketIds) && budget.ticketIds.length ? new Set(budget.ticketIds) : null;
@@ -2213,7 +2215,7 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
     const n = this.missionFiled(session.id).length;
     const live = this.mission.agent(meta.agentId);
     // Stop and the timer leave a note the run reads back; keep those.
-    if (live?.status === 'working' && live.sessionId === session.id && !/^(Stopped|Time is up)/.test(live.note || '')) {
+    if (live?.status === 'working' && live.sessionId === session.id && !/^(Stopped|Time is up|Stuck in a loop)/.test(live.note || '')) {
       this.mission.patchAgent(live.id, { note: `Filed ${n} ticket${n === 1 ? '' : 's'}` });
     }
     this.missionChanged();
@@ -2259,6 +2261,7 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
       const n = this.mission.agent(agent.id)?.note || '';
       if (n.startsWith('Stopped')) return ['stopped', 'You stopped the run before this ticket was reported.'];
       if (n.startsWith('Time is up')) return ['timeout', 'Time ran out before this ticket was reported.'];
+      if (n.startsWith('Stuck in a loop')) return ['not-fixed', 'The run kept looping without progress and was stopped.'];
       return ['not-fixed', 'The run ended without reporting on this ticket.'];
     };
     const lastReport = (session) => messageText([...session.messages].reverse()
@@ -2584,6 +2587,19 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
     // edits push undo snapshots here (capped; before-images clipped). They
     // ride along in the session file so Undo survives a restart.
     agent.toolCtx.sessionId = session.id;
+    // Nobody watches a dwarf's chat live: a loop ends the turn instead of
+    // grinding on, which matters most on "no time" runs with no deadline.
+    if (session.mission) {
+      agent.maxLoopStrikes = 3;
+      agent.stopOnLoop = false;
+      agent.on('done', (result) => {
+        const live = this.mission.agent(session.mission.agentId);
+        if (result?.reason === 'loop' && live?.status === 'working' && live.sessionId === session.id) {
+          this.mission.patchAgent(live.id, { note: 'Stuck in a loop — stopped' });
+          this.missionChanged();
+        }
+      });
+    }
     agent.on('tool_call', (call) => {
       if (call.name === 'run_command') workTurn.commands.push({ id: call.id, command: redactCredentials(call.args?.command || ''), status: 'running', exitCode: null });
     });
@@ -2810,6 +2826,17 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
         // "I'll continue when this finishes" must actually continue.
         const live = this.turns.get(task.sessionId);
         if (live?.agent?.running && live.agent.steer(note, { role: 'system' })) return;
+        // A Mission Control chat whose run is over (crashed, stopped, timed
+        // out) must not come back to life on its own: the dwarf is already in
+        // the break room. Keep the result for whoever opens the chat next.
+        const stored = await this.sessions.get(task.sessionId).catch(() => null);
+        if (stored?.mission) {
+          const owner = this.mission.agent(stored.mission.agentId);
+          if (!(owner?.status === 'working' && owner.sessionId === task.sessionId)) {
+            await this.mutateSession(task.sessionId, (s) => { s.messages.push({ role: 'system', content: note }); });
+            return;
+          }
+        }
         await this.chat(task.sessionId, '', [], { systemMessage: note });
       } catch (err) {
         // Keep the evidence when the model is unavailable. The next manual

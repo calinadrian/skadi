@@ -699,38 +699,385 @@ export class AgentBrowser extends EventEmitter {
 
 export { SHOTS_DIR };
 
+// ------------------------------------------------------------ page map
+//
+// The model's view of a page is a numbered list of what it can act on, like
+// the accessibility tree a human-grade browser agent reads. Each element gets
+// a data-skadi-ref attribute, so "click 3" names exactly one thing until the
+// next snapshot renumbers the page. Numbers, visible text and CSS selectors
+// all resolve through one function: a 7B model that writes "Sign in" instead
+// of the ref still lands on the button.
+
+function pageHelpers() {
+  if (window.__skadi) return window.__skadi;
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  const SEL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=option],[role=switch],[role=combobox],[role=textbox],[contenteditable=""],[contenteditable=true],[onclick],[tabindex]:not([tabindex="-1"])';
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity) > 0.05;
+  };
+  const role = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const t = el.tagName.toLowerCase();
+    if (t === 'a') return 'link';
+    if (t === 'input') {
+      const ty = (el.type || 'text').toLowerCase();
+      if (ty === 'checkbox' || ty === 'radio') return ty;
+      if (/^(submit|button|reset|image)$/.test(ty)) return 'button';
+      return 'textbox';
+    }
+    if (t === 'textarea' || el.isContentEditable) return 'textbox';
+    if (t === 'select') return 'combobox';
+    return t === 'summary' ? 'button' : t;
+  };
+  const label = (el) => {
+    const byId = el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+    const aria = el.getAttribute('aria-labelledby');
+    const labelled = aria && aria.split(' ').map((id) => document.getElementById(id)?.innerText).filter(Boolean).join(' ');
+    return clean(el.getAttribute('aria-label') || labelled || byId?.innerText || el.closest('label')?.innerText
+      || (el.tagName === 'INPUT' && /^(submit|button|reset)$/i.test(el.type) ? el.value : '')
+      || (el.tagName === 'SELECT' ? '' : el.innerText) || el.placeholder || el.title || el.alt || el.getAttribute('name') || el.id || '').slice(0, 80);
+  };
+  const describe = (el) => {
+    const r = role(el);
+    let line = `${r} "${label(el)}"`;
+    const t = el.tagName;
+    if (t === 'INPUT' || t === 'TEXTAREA') {
+      if (/checkbox|radio/.test(r)) line += el.checked ? ' [checked]' : ' [unchecked]';
+      else if (el.value) line += ` value="${clean(el.type === 'password' ? '***' : el.value).slice(0, 60)}"`;
+      else if (el.placeholder && label(el) !== clean(el.placeholder)) line += ` placeholder="${clean(el.placeholder).slice(0, 40)}"`;
+    } else if (t === 'SELECT') {
+      line += ` selected="${clean(el.selectedOptions[0]?.text)}" options: ${[...el.options].slice(0, 12).map((o) => clean(o.text)).join(' | ')}`;
+    } else if (el.getAttribute('aria-checked')) {
+      line += el.getAttribute('aria-checked') === 'true' ? ' [checked]' : ' [unchecked]';
+    }
+    const href = t === 'A' && el.getAttribute('href');
+    if (href && !href.startsWith('javascript')) line += ` -> ${href.slice(0, 80)}`;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') line += ' [disabled]';
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom < 0) line += ' (above, scroll up)';
+    else if (rect.top > innerHeight) line += ' (below, scroll down)';
+    return line;
+  };
+  const snapshot = (maxEls, maxText) => {
+    document.querySelectorAll('[data-skadi-ref]').forEach((e) => e.removeAttribute('data-skadi-ref'));
+    const els = [];
+    const all = [...document.querySelectorAll(SEL)].filter(visible);
+    for (const el of all) {
+      // A button inside a link (or the reverse) is one target, not two.
+      if (els.some((p) => p.contains(el) && label(p) === label(el))) continue;
+      els.push(el);
+      if (els.length >= maxEls) break;
+    }
+    const lines = els.map((el, i) => { el.setAttribute('data-skadi-ref', String(i + 1)); return `[${i + 1}] ${describe(el)}`; });
+    const dialog = [...document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]')].find(visible);
+    const text = clean(document.body ? document.body.innerText : '');
+    return {
+      title: document.title,
+      url: location.href,
+      dialog: dialog ? clean(dialog.innerText).slice(0, 300) : '',
+      elements: lines,
+      more: all.length > els.length && els.length >= maxEls,
+      text: text.length > maxText ? `${text.slice(0, maxText)} ... [more text: use browser_read]` : text,
+      scroll: { y: Math.round(scrollY), max: Math.max(0, Math.round(document.documentElement.scrollHeight - innerHeight)) },
+    };
+  };
+  // Resolve what the model named to one element: a ref number, a CSS
+  // selector, or visible text (exact label first, then contains).
+  const find = (target) => {
+    const t = clean(target).replace(/^ref[\s_=:-]*/i, '').replace(/^\[|\]$/g, '').replace(/^e(?=\d+$)/i, '');
+    if (/^\d+$/.test(t)) {
+      const el = document.querySelector(`[data-skadi-ref="${t}"]`);
+      return el ? { el } : { error: `No element [${t}] on the page now. The page may have changed: call browser_snapshot for fresh numbers.` };
+    }
+    if (/^[#.[]|^[a-z]+[#.[:]|^(input|button|select|textarea|a|form|img)$/i.test(t)) {
+      try { const el = document.querySelector(t); if (el) return { el }; } catch { /* not a selector */ }
+    }
+    const want = t.toLowerCase().replace(/^["']|["']$/g, '');
+    const all = [...document.querySelectorAll(SEL)].filter(visible);
+    const hit = all.find((el) => label(el).toLowerCase() === want)
+      || all.find((el) => label(el).toLowerCase().includes(want))
+      || all.find((el) => clean(el.placeholder).toLowerCase().includes(want));
+    if (hit) return { el: hit };
+    // Last try: any visible leaf whose own text matches, e.g. a clickable card.
+    const any = [...document.querySelectorAll('body *')].find((el) => el.children.length === 0 && visible(el) && clean(el.innerText).toLowerCase() === want);
+    return any ? { el: any } : { error: `Nothing on the page matches "${t}". Call browser_snapshot and use a number from the list.` };
+  };
+  const locate = (target) => {
+    const r = find(target);
+    if (r.error) return r;
+    r.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const b = r.el.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2), what: describe(r.el), tag: r.el.tagName, role: role(r.el) };
+  };
+  window.__skadi = { snapshot, find, locate, describe, clean };
+  return window.__skadi;
+}
+
+/** An expression that runs `body` with the page helpers bound to S. */
+const page = (body) => `(() => { const S = (${pageHelpers.toString()})(); ${body} })()`;
+
+/** The snapshot as the model reads it: short, numbered, one line each. */
+export function formatSnapshot(snap, { note = '' } = {}) {
+  if (!snap) return note || 'The page could not be read.';
+  const out = [];
+  if (note) out.push(note);
+  out.push(`Page: "${snap.title || '(no title)'}" — ${snap.url}`);
+  if (snap.dialog) out.push(`A dialog is open: ${snap.dialog}`);
+  out.push(snap.elements.length
+    ? `Elements (use the number with browser_click / browser_type):\n${snap.elements.join('\n')}${snap.more ? '\n... more elements: scroll, then browser_snapshot' : ''}`
+    : 'No clickable elements are visible.');
+  if (snap.text) out.push(`Text: ${snap.text}`);
+  if (snap.scroll?.max > 0) out.push(`Scroll: ${snap.scroll.y} of ${snap.scroll.max}px${snap.scroll.y < snap.scroll.max ? ' (more below)' : ''}.`);
+  return out.join('\n\n');
+}
+
+/** A URL, a bare host or a full local path, turned into what Chromium opens. */
+export function normaliseUrl(input) {
+  const raw = String(input || '').trim().replace(/^["']|["']$/g, '');
+  if (/^(https?|file):\/\//i.test(raw) || /^about:blank$/i.test(raw)) return raw;
+  if (/^[a-z]:[\\/]/i.test(raw) || raw.startsWith('/')) {
+    const segs = raw.replace(/\\/g, '/').split('/');
+    const path = segs.map((seg, i) => (i === 0 && /^[a-z]:$/i.test(seg) ? seg : encodeURIComponent(seg))).join('/');
+    return `file://${path.startsWith('/') ? '' : '/'}${path}`;
+  }
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(raw)) return `http://${raw}`;
+  // "index.html" is a relative file, not a website at index.html.
+  const relativeFile = /\.(html?|xhtml|svg|md|txt|json|js|css|png|jpe?g|gif|pdf)$/i.test(raw) && !raw.includes('/');
+  if (!relativeFile && /^[\w-]+(\.[\w-]+)+(:\d+)?(\/|$)/.test(raw)) return `https://${raw}`;
+  throw new Error(`"${raw}" is not a URL or a full file path. Examples: http://localhost:5173, https://example.com, C:/site/index.html`);
+}
+
+/** Key names as small models write them: "enter", "esc", "down". */
+export function keyName(name) {
+  const k = String(name || '').trim().toLowerCase().replace(/^arrow/, '');
+  const names = {
+    enter: 'Enter', return: 'Enter', tab: 'Tab', esc: 'Escape', escape: 'Escape', backspace: 'Backspace',
+    delete: 'Delete', del: 'Delete', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+    home: 'Home', end: 'End', pageup: 'PageUp', pgup: 'PageUp', pagedown: 'PageDown', pgdn: 'PageDown',
+  };
+  return names[k] || String(name || '').trim();
+}
+
 /**
  * Browser tools exposed to the model.
  *
- * `vision` decides how a screenshot is handled: a model that can see gets the
- * image back and may click by coordinate; a text-only model is steered towards
- * reading the page and the interactive map instead of pretending to look.
+ * Built so a small model can drive a page: every action answers with a fresh
+ * numbered snapshot, so the model never has to remember to look, and a target
+ * is whatever it can name -- a number from the list, the visible text, or a
+ * CSS selector. `vision` adds coordinate clicks for models that can see.
  */
 export function browserTools(getBrowser, { onScreenshot, vision = () => false } = {}) {
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const snap = async (browser, { maxEls = 60, maxText = 1500, note = '' } = {}) => {
+    const value = await browser.evaluate(page(`return S.snapshot(${maxEls}, ${maxText});`)).catch(() => null);
+    return formatSnapshot(value, { note });
+  };
+  // Small models name the target under whatever key comes to mind.
+  const targetOf = (args) => args?.target ?? args?.ref ?? args?.element ?? args?.selector ?? args?.field ?? args?.label;
+  // Clicks go through real mouse events at the element's centre, so the page
+  // sees a trusted click the way it would from a person.
+  const locate = async (browser, target) => {
+    if (target === undefined || target === null || String(target).trim() === '') {
+      throw new Error('Say what to act on: a number from browser_snapshot, the visible text, or a CSS selector.');
+    }
+    const hit = await browser.evaluate(page(`return S.locate(${JSON.stringify(String(target))});`));
+    if (!hit || hit.error) throw new Error(hit?.error || `Could not find ${target}.`);
+    return hit;
+  };
+  const afterAction = async (browser, before, note) => {
+    await settle(500);
+    // A click that navigated needs the new document to finish painting.
+    const now = await browser.evaluate('location.href').catch(() => before);
+    if (now !== before) await settle(800);
+    return snap(browser, { note });
+  };
+  const href = (browser) => browser.evaluate('location.href').catch(() => null);
+  const target = { type: 'string', description: 'What to act on: the number from the element list (e.g. "3"), the visible text (e.g. "Sign in"), or a CSS selector.' };
+
   const tools = {
     browser_open: {
       schema: {
-        description:
-          'Open a URL in the review browser embedded in Skadi. Use this to look at a running app or dev server after changing it.',
+        description: 'Open a page in the built-in browser and get its numbered element list. Takes a URL (http://localhost:5173, https://example.com), a full file path (C:/site/index.html), or "back", "forward", "reload".',
         parameters: {
           type: 'object',
-          properties: { url: { type: 'string', description: 'Full URL, e.g. http://localhost:5173' } },
+          properties: { url: { type: 'string', description: 'URL, full file path, or back / forward / reload.' } },
           required: ['url'],
         },
       },
       async run({ url }) {
-        if (!/^https?:\/\//i.test(url)) throw new Error('url must start with http:// or https://');
         const browser = await getBrowser();
-        await browser.open(url);
+        const word = String(url || '').trim().toLowerCase();
+        if (word === 'back' || word === 'forward') await browser.history(word === 'back' ? -1 : 1);
+        else if (word === 'reload' || word === 'refresh') await browser.reload();
+        else await browser.open(normaliseUrl(url));
+        const errors = browser.console.filter((c) => /error/i.test(c.level)).length;
+        return snap(browser, { note: errors ? `Warning: ${errors} console error(s) while loading. Call browser_console to read them.` : '' });
+      },
+    },
+
+    browser_snapshot: {
+      schema: {
+        description: 'Look at the current page: title, URL, a numbered list of buttons, links and fields, and the page text. Call it whenever you are unsure what is on the page.',
+        parameters: { type: 'object', properties: {} },
+      },
+      async run() {
+        return snap(await getBrowser(), { maxEls: 100, maxText: 4000 });
+      },
+    },
+
+    browser_click: {
+      schema: {
+        description: 'Click an element. Answers with the page after the click.',
+        parameters: {
+          type: 'object',
+          properties: { target, double: { type: 'boolean', description: 'Double-click instead.' } },
+          required: ['target'],
+        },
+      },
+      async run(args) {
+        const browser = await getBrowser();
+        const before = await href(browser);
+        const hit = await locate(browser, targetOf(args) ?? args?.text);
+        await browser.clickAt(hit.x, hit.y, { clickCount: args?.double ? 2 : 1 });
+        return afterAction(browser, before, `Clicked ${hit.what}.`);
+      },
+    },
+
+    browser_type: {
+      schema: {
+        description: 'Type into a text field (it is cleared first) or pick an option in a dropdown. Set submit to true to press Enter afterwards. Answers with the page after typing.',
+        parameters: {
+          type: 'object',
+          properties: {
+            target,
+            text: { type: 'string', description: 'The text to type, or the option to pick.' },
+            submit: { type: 'boolean', description: 'Press Enter after typing, e.g. to search or log in.' },
+          },
+          required: ['target', 'text'],
+        },
+      },
+      async run(args) {
+        const browser = await getBrowser();
+        const before = await href(browser);
+        const text = String(args?.text ?? args?.value ?? '');
+        const name = targetOf(args);
+        const hit = await locate(browser, name);
+        if (hit.tag === 'SELECT') {
+          const chosen = await browser.evaluate(page(`
+            const el = S.find(${JSON.stringify(String(name))}).el;
+            const want = ${JSON.stringify(text.toLowerCase())};
+            const opts = [...el.options];
+            const opt = opts.find((o) => S.clean(o.text).toLowerCase() === want || o.value.toLowerCase() === want)
+              || opts.find((o) => S.clean(o.text).toLowerCase().includes(want));
+            if (!opt) return { error: 'No option ' + ${JSON.stringify(JSON.stringify(text))} + '. Options: ' + opts.map((o) => S.clean(o.text)).join(' | ') };
+            el.value = opt.value;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return { text: S.clean(opt.text) };`));
+          if (chosen?.error) throw new Error(chosen.error);
+          return afterAction(browser, before, `Picked "${chosen.text}" in ${hit.what}.`);
+        }
+        if (hit.role !== 'textbox' && hit.role !== 'combobox' && hit.role !== 'searchbox') {
+          throw new Error(`${hit.what} is not a text field. Use browser_click for it, or pick a textbox number from browser_snapshot.`);
+        }
+        await browser.clickAt(hit.x, hit.y);
+        // Clear what is there, whether a plain input or a framework-managed one.
+        await browser.evaluate(`(() => { const el = document.activeElement; if (!el) return;
+          if (el.isContentEditable) { document.execCommand('selectAll'); document.execCommand('delete'); return; }
+          if ('value' in el) { const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+            set ? set.call(el, '') : (el.value = ''); el.dispatchEvent(new Event('input', { bubbles: true })); } })()`);
+        if (text) await browser.typeText(text);
+        const submit = args?.submit === true || String(args?.submit).toLowerCase() === 'true' || keyName(args?.press) === 'Enter';
+        if (submit) await browser.pressKey('Enter');
+        return afterAction(browser, before, `Typed ${JSON.stringify(text)} into ${hit.what}${submit ? ' and pressed Enter' : ''}.`);
+      },
+    },
+
+    browser_press: {
+      schema: {
+        description: 'Press a key on the focused element: Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp, PageDown, Home, End.',
+        parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
+      },
+      async run({ key }) {
+        const browser = await getBrowser();
+        const before = await href(browser);
+        await browser.pressKey(keyName(key));
+        return afterAction(browser, before, `Pressed ${keyName(key)}.`);
+      },
+    },
+
+    browser_scroll: {
+      schema: {
+        description: 'Scroll "down" or "up" by one screen, to "top" or "bottom", or to an element (a number from the list, or its text).',
+        parameters: {
+          type: 'object',
+          properties: { to: { type: 'string', description: 'down, up, top, bottom, or an element.' } },
+        },
+      },
+      async run(args) {
+        const browser = await getBrowser();
+        const to = String(args?.to ?? args?.direction ?? targetOf(args) ?? (Number(args?.amount) < 0 ? 'up' : 'down')).trim();
+        const word = to.toLowerCase();
         const vp = browser.viewport();
-        return `Opened ${url}${browser.title ? ` — "${browser.title}"` : ''}. Viewport is ${vp.width}x${vp.height} (${browser.device}).`;
+        let done = word;
+        if (word === 'down' || word === 'up') await browser.scrollAt(vp.width / 2, vp.height / 2, (word === 'up' ? -1 : 1) * Math.round(vp.height * 0.8));
+        else if (word === 'top' || word === 'bottom') await browser.evaluate(`window.scrollTo(0, ${word === 'top' ? 0 : 'document.documentElement.scrollHeight'})`);
+        else done = `to ${(await locate(browser, to)).what}`;
+        await settle(300);
+        return snap(browser, { note: `Scrolled ${done}.` });
+      },
+    },
+
+    browser_wait: {
+      schema: {
+        description: 'Wait until some text appears on the page (up to 15 seconds), or for a number of seconds. Use it after something that loads slowly.',
+        parameters: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', description: 'Text to wait for.' },
+            seconds: { type: 'number', description: 'Seconds to wait, at most 15.' },
+          },
+        },
+      },
+      async run({ text, seconds }) {
+        const browser = await getBrowser();
+        const limit = Math.min(15, Math.max(0.5, Number(seconds) || (text ? 15 : 2))) * 1000;
+        const start = Date.now();
+        if (text) {
+          const want = JSON.stringify(String(text).toLowerCase());
+          while (Date.now() - start < limit) {
+            if (await browser.evaluate(`(document.body?.innerText || '').toLowerCase().includes(${want})`).catch(() => false)) {
+              return snap(browser, { note: `"${text}" appeared after ${((Date.now() - start) / 1000).toFixed(1)}s.` });
+            }
+            await settle(400);
+          }
+          return snap(browser, { note: `"${text}" did not appear within ${limit / 1000}s.` });
+        }
+        await settle(limit);
+        return snap(browser, { note: `Waited ${limit / 1000}s.` });
+      },
+    },
+
+    browser_read: {
+      schema: {
+        description: 'Read all visible text of the current page (longer than the snapshot text).',
+        parameters: { type: 'object', properties: {} },
+      },
+      async run() {
+        const browser = await getBrowser();
+        const text = String((await browser.text()) || '').trim();
+        if (!text) return 'The page rendered no visible text.';
+        return text.length > 12000 ? `${text.slice(0, 12000)}\n... [truncated]` : text;
       },
     },
 
     browser_screenshot: {
       schema: {
-        description:
-          'Capture the current page. The user always sees it. If you can view images it is returned to you, and its pixel coordinates match browser_click_at.',
+        description: 'Capture the page so the user can see it. If you can view images it is returned to you too.',
         parameters: {
           type: 'object',
           properties: { full_page: { type: 'boolean', description: 'Capture past the viewport.' } },
@@ -742,29 +1089,31 @@ export function browserTools(getBrowser, { onScreenshot, vision = () => false } 
         onScreenshot?.(shot);
         const vp = browser.viewport();
         return vision()
-          ? `Screenshot captured (${vp.width}x${vp.height}). It is attached for you to look at; coordinates in it map directly to browser_click_at.`
-          : `Screenshot captured (${Math.round(shot.bytes / 1024)} KB) and shown to the user. You cannot view images — use browser_read and browser_elements to inspect the page.`;
+          ? `Screenshot captured (${vp.width}x${vp.height}). It is attached for you to look at; its pixel coordinates work with browser_click_at.`
+          : 'Screenshot shown to the user. You cannot view images: use browser_snapshot to check the page.';
       },
     },
 
-    browser_read: {
+    browser_console: {
       schema: {
-        description:
-          'Read the visible text of the current page. The reliable way to check what actually rendered.',
-        parameters: { type: 'object', properties: {} },
+        description: 'Read console errors and logs. Check it after loading a page you changed.',
+        parameters: { type: 'object', properties: { errors_only: { type: 'boolean' } } },
       },
-      async run() {
+      async run({ errors_only }) {
         const browser = await getBrowser();
-        const text = String((await browser.text()) || '').trim();
-        if (!text) return 'The page rendered no visible text.';
-        return text.length > 12000 ? `${text.slice(0, 12000)}\n... [truncated]` : text;
+        const rows = browser.console.filter((c) => !errors_only || /error|warning/i.test(c.level));
+        if (!rows.length) return errors_only ? 'No errors or warnings.' : 'Console is empty.';
+        return rows
+          .slice(-60)
+          .map((c) => `[${c.level}] ${c.text}${c.url ? ` (${c.url}:${c.line ?? '?'})` : ''}`)
+          .join('\n');
       },
     },
 
     browser_extract: {
       schema: {
         description:
-          'Extract structured research data from the current dynamic page: headings, links, images with nearby card text, and embedded JSON. Use this when visible text alone does not expose lists, comps, products, or other data rendered by JavaScript.',
+          'Extract structured data from the current page: headings, links, images with nearby text, and embedded JSON. Use it for lists, products or results that the snapshot text does not show well.',
         parameters: {
           type: 'object',
           properties: {
@@ -801,132 +1150,10 @@ export function browserTools(getBrowser, { onScreenshot, vision = () => false } 
       },
     },
 
-    browser_elements: {
-      schema: {
-        description:
-          'List the clickable elements on screen with their labels and centre coordinates. Use this to choose a target for browser_click_at without vision.',
-        parameters: { type: 'object', properties: {} },
-      },
-      async run() {
-        const browser = await getBrowser();
-        const items = await browser.interactiveMap();
-        if (!items?.length) return 'No interactive elements are visible.';
-        return items.map((i) => `(${i.x},${i.y}) <${i.tag}> ${i.label || '[no label]'}`).join('\n');
-      },
-    },
-
-    browser_click_at: {
-      schema: {
-        description:
-          'Click at a pixel coordinate in the viewport. Coordinates come from a screenshot you can see, or from browser_elements.',
-        parameters: {
-          type: 'object',
-          properties: {
-            x: { type: 'integer' },
-            y: { type: 'integer' },
-            double: { type: 'boolean' },
-          },
-          required: ['x', 'y'],
-        },
-      },
-      async run({ x, y, double }) {
-        const browser = await getBrowser();
-        const vp = browser.viewport();
-        if (x < 0 || y < 0 || x > vp.width || y > vp.height) {
-          throw new Error(`(${x},${y}) is outside the ${vp.width}x${vp.height} viewport`);
-        }
-        await browser.clickAt(x, y, { clickCount: double ? 2 : 1 });
-        return `Clicked at (${x}, ${y}).`;
-      },
-    },
-
-    browser_click: {
-      schema: {
-        description: 'Click the first element matching a CSS selector. Prefer this when you know the selector.',
-        parameters: {
-          type: 'object',
-          properties: { selector: { type: 'string' } },
-          required: ['selector'],
-        },
-      },
-      async run({ selector }) {
-        await (await getBrowser()).click(selector);
-        return `Clicked ${selector}.`;
-      },
-    },
-
-    browser_type: {
-      schema: {
-        description:
-          'Type text into whatever currently has focus, then optionally press a key. Click the field first.',
-        parameters: {
-          type: 'object',
-          properties: {
-            text: { type: 'string' },
-            press: { type: 'string', description: 'Optional key afterwards, e.g. Enter or Tab.' },
-          },
-        },
-      },
-      async run({ text, press }) {
-        const browser = await getBrowser();
-        if (text) await browser.typeText(text);
-        if (press) await browser.pressKey(press);
-        return `Typed${text ? ` ${JSON.stringify(text)}` : ''}${press ? ` and pressed ${press}` : ''}.`;
-      },
-    },
-
-    browser_fill: {
-      schema: {
-        description: 'Set the value of an input or textarea by selector and fire input/change events.',
-        parameters: {
-          type: 'object',
-          properties: { selector: { type: 'string' }, value: { type: 'string' } },
-          required: ['selector', 'value'],
-        },
-      },
-      async run({ selector, value }) {
-        await (await getBrowser()).fill(selector, value);
-        return `Set ${selector} to ${JSON.stringify(value)}.`;
-      },
-    },
-
-    browser_scroll: {
-      schema: {
-        description: 'Scroll the page. Positive amounts scroll down.',
-        parameters: {
-          type: 'object',
-          properties: { amount: { type: 'integer', description: 'Pixels, default 600.' } },
-        },
-      },
-      async run({ amount }) {
-        const browser = await getBrowser();
-        const vp = browser.viewport();
-        await browser.scrollAt(vp.width / 2, vp.height / 2, amount ?? 600);
-        return `Scrolled ${amount ?? 600}px.`;
-      },
-    },
-
-    browser_console: {
-      schema: {
-        description:
-          'Read console output and uncaught errors. Check this after any change that could break at runtime.',
-        parameters: { type: 'object', properties: { errors_only: { type: 'boolean' } } },
-      },
-      async run({ errors_only }) {
-        const browser = await getBrowser();
-        const rows = browser.console.filter((c) => !errors_only || /error|warning/i.test(c.level));
-        if (!rows.length) return errors_only ? 'No errors or warnings.' : 'Console is empty.';
-        return rows
-          .slice(-60)
-          .map((c) => `[${c.level}] ${c.text}${c.url ? ` (${c.url}:${c.line ?? '?'})` : ''}`)
-          .join('\n');
-      },
-    },
-
     browser_eval: {
       schema: {
         description:
-          'Evaluate a JavaScript expression in the page and return the result. For inspection, not for building features.',
+          'Run a JavaScript expression in the page and return the result. For precise checks, e.g. getComputedStyle(document.querySelector(".card")).color.',
         parameters: {
           type: 'object',
           properties: { expression: { type: 'string' } },
@@ -939,6 +1166,31 @@ export function browserTools(getBrowser, { onScreenshot, vision = () => false } 
       },
     },
   };
+
+  // Coordinate clicks only help a model that can see the screenshot; for a
+  // text-only model they invite guessed numbers.
+  if (vision()) {
+    tools.browser_click_at = {
+      schema: {
+        description: 'Click at a pixel coordinate read off a screenshot. Prefer browser_click with a number when the element is in the list.',
+        parameters: {
+          type: 'object',
+          properties: { x: { type: 'integer' }, y: { type: 'integer' }, double: { type: 'boolean' } },
+          required: ['x', 'y'],
+        },
+      },
+      async run({ x, y, double }) {
+        const browser = await getBrowser();
+        const vp = browser.viewport();
+        if (x < 0 || y < 0 || x > vp.width || y > vp.height) {
+          throw new Error(`(${x},${y}) is outside the ${vp.width}x${vp.height} viewport`);
+        }
+        const before = await href(browser);
+        await browser.clickAt(x, y, { clickCount: double ? 2 : 1 });
+        return afterAction(browser, before, `Clicked at (${x}, ${y}).`);
+      },
+    };
+  }
 
   return tools;
 }

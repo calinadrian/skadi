@@ -138,6 +138,10 @@ export class Agent extends EventEmitter {
     // soon as the semantic supervisor confirms they are no longer making
     // progress. A parent agent instead gets guidance and may adapt in place.
     this.stopOnLoop = Boolean(stopOnLoop);
+    // Unattended runs (Mission Control) have nobody to notice a loop, so a
+    // hint is not enough: after this many loop findings in one turn, end it.
+    // Zero keeps the interactive behaviour: hints only.
+    this.maxLoopStrikes = 0;
     // Tool schemas ride on every request alongside the transcript, so they
     // count toward the window too. Cached: schemas do not change mid-turn.
     this.schemasTokens = estimateTokens([{ role: 'system', content: JSON.stringify(schemas || []) }]);
@@ -526,6 +530,12 @@ export class Agent extends EventEmitter {
                 totalTokens,
                 turnMs: Date.now() - turnStarted,
               });
+              return messages;
+            }
+            const totalStrikes = [...ledger.loopStrikes.values()].reduce((sum, n) => sum + n, 0);
+            if (this.maxLoopStrikes && totalStrikes >= this.maxLoopStrikes) {
+              await this._append(messages, { role: 'assistant', content: `Stopped: the run kept looping without progress (${totalStrikes} loop checks this turn).${review.reason ? ` Last finding: ${review.reason}.` : ''}` });
+              this.emit('done', { rounds, incomplete: true, reason: 'loop', totalTokens, turnMs: Date.now() - turnStarted });
               return messages;
             }
             if (removed.length) continue;

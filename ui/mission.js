@@ -859,14 +859,16 @@ function giveWork({ agent = null, room = null, ticket = null } = {}) {
   const target = h('select', 'mc-input');
   const targetField = field('', target);
   const row = h('div', 'mc-row');
-  row.append(field('Time limit', time), targetField);
+  const timeField = field('Time limit', time);
+  row.append(timeField, targetField);
   const note = h('p', 'mc-note');
   body.append(row, note);
 
   const { buttons } = modal(ticket ? fixOf(ticket)[1] : agent ? `Give ${agent.name} work` : 'Give work', body, [
     ['Cancel'],
     ['Start', 'primary', () => {
-      const budget = { minutes: Number(time.value) || 0, target: ticket || s.room === 'docs' ? 0 : Number(target.value) || 0 };
+      // Fixing runs until each ticket is reported: a clock only cuts it off mid-fix.
+      const budget = { minutes: s.room === 'development' ? 0 : Number(time.value) || 0, target: ticket || s.room === 'docs' ? 0 : Number(target.value) || 0 };
       store(`mission.budget.${s.room}`, JSON.stringify(budget));
       store('mission.worker', s.who);
       if (!ticket) {
@@ -899,6 +901,7 @@ function giveWork({ agent = null, room = null, ticket = null } = {}) {
     }
     const want = Number(target.value || target.dataset.saved || 0);
     targetField.hidden = !!ticket || s.room === 'docs';
+    timeField.hidden = s.room === 'development';
     targetField.querySelector('.mc-field-label').textContent = look.target || 'Goal';
     const counts = s.room === 'development' ? [0, ...[1, 2, 3, 5, 8].filter((n) => n < ready)] : [0, 1, 2, 3, 5, 8, 12];
     target.replaceChildren(...counts.map((n) => new Option(n ? String(n) : s.room === 'development' ? `All approved (${ready})` : 'Let them decide', n, false, n === want)));

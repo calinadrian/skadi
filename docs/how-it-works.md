@@ -275,17 +275,23 @@ recently used one that nobody is watching and no running turn is using; 0 keeps
 them all. Each gets the first free debugging port from 9333 up, skipping ports
 other programs hold.
 
-The viewport is pinned at **1280×800**, which is the point: screenshot pixels
-and click coordinates share one space, so a vision model can identify a target
-in an image and click it with `browser_click_at`.
+The model reads a page as a numbered list, the way a browser agent reads an
+accessibility tree: every button, link and field gets a number (`[3] button
+"Sign in"`), stamped on the element as `data-skadi-ref`. Actions take a
+`target` that is that number, the visible text, or a CSS selector, all
+resolved by one in-page helper, so a small model that writes "Sign in" instead
+of `3` still lands on the button. Clicks are real mouse events at the element's
+centre, after scrolling it into view. Every action answers with the fresh
+list, so the model sees the result without having to remember to look.
 
-Tools: `browser_open`, `browser_read`, `browser_elements`, `browser_click`,
-`browser_click_at`, `browser_type`, `browser_fill`, `browser_scroll`,
-`browser_screenshot`, `browser_console`, `browser_eval`.
-
-Without vision, `browser_elements` is the substitute — it lists every visible
-clickable element with its label and centre point, so the agent can click
-accurately from text alone. The `browser-review` skill teaches both paths.
+Tools: `browser_open` (URL, file path, or back/forward/reload),
+`browser_snapshot`, `browser_click`, `browser_type` (clears first; also picks
+dropdown options; `submit` presses Enter), `browser_press`, `browser_scroll`,
+`browser_wait`, `browser_read`, `browser_screenshot`, `browser_console`,
+`browser_extract`, `browser_eval`. A model with vision also gets
+`browser_click_at`: the viewport is pinned at **1280×800**, so screenshot
+pixels and click coordinates share one space. The `browser-review` skill
+teaches the numbered workflow in short recipes.
 
 The console panel under the pane shows the same lines the agent reads with
 `browser_console` — logs, warnings, uncaught exceptions — live, filterable to
