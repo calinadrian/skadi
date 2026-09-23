@@ -10,7 +10,8 @@ import { spawn } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { redactCredentials } from './sessions.mjs';
-import { ToolError } from './tools.mjs';
+import { ToolError, killTree } from './tools.mjs';
+import { trackProcess } from './processes.mjs';
 
 const MAX_KEPT_CHARS = 192 * 1024;
 const UPDATE_THROTTLE_MS = 800;
@@ -85,6 +86,7 @@ export class TaskManager extends EventEmitter {
     }
     task.proc = child;
     task.pid = child.pid ?? null;
+    trackProcess(child.pid);
     this.tasks.set(id, task);
     this.persist();
 
@@ -131,8 +133,10 @@ export class TaskManager extends EventEmitter {
     const task = this.tasks.get(task_id);
     if (!task) throw new ToolError(`no background task "${task_id}" (it may predate a restart)`);
     if (task.status !== 'running') return `Task ${task_id} already finished (exit ${task.exitCode}).`;
+    // The whole tree: kill() alone stops only the shell, and the dev server it
+    // launched would keep running with its port bound.
     try {
-      task.proc?.kill();
+      if (task.proc) killTree(task.proc);
     } catch {
       /* already gone */
     }

@@ -147,6 +147,7 @@ const ICONS = {
   edit: '<path d="M10.5 2.5l3 3L6 13H3v-3z"/>',
   chat: '<path d="M2.5 3h11v7.5h-6L4.5 13v-2.5h-2z"/>',
   trash: '<path d="M2.5 4.5h11M6 4.5V2.5h4v2M4 4.5l.7 9h6.6l.7-9"/>',
+  desk: '<path d="M2 2.5h12v8.5H2zM6 14h4M8 11v3"/>',
 };
 function iconBtn(name, label, fn, cls = '') {
   const b = h('button', `mc-icon-btn ${cls}`);
@@ -357,6 +358,7 @@ const ART = {
 // ------------------------------------------------------------------- render
 
 function render() {
+  syncPets();
   const root = $('missionView');
   if (!root || root.hidden || !m.data) return;
   // Rebuilding mid-drag would drop the dwarf being carried.
@@ -461,7 +463,9 @@ function roomCard(room) {
 
   const foot = h('div', 'mc-foot');
   const line = h('div', 'mc-foot-line');
-  line.append(h('span', 'mc-room-name', room.name), h('span', 'mc-room-hall', look.hall || ''));
+  const title = h('div', 'mc-foot-title');
+  title.append(h('span', 'mc-room-name', room.name), h('span', 'mc-room-hall', look.hall || ''));
+  line.append(title);
   let badge = '';
   if (working.length) badge = `${working.length} at work`;
   else if (room.id === 'break' && here.length) badge = `${here.length} resting`;
@@ -599,7 +603,12 @@ function crewCard(a) {
   pic.append(sprite(a, { portrait: true }));
   const body = h('div', 'mc-card-body');
   const top = h('div', 'mc-card-top');
-  top.append(h('span', 'mc-card-name', a.name), pill(a), iconBtn('edit', `Edit ${a.name}`, () => editAgent(a), 'mc-card-edit'));
+  top.append(h('span', 'mc-card-name', a.name), pill(a));
+  if (shellPets()) {
+    const out = onDesktop(a.id);
+    top.append(iconBtn('desk', out ? `Take ${a.name} off the desktop` : `Put ${a.name} on the desktop`, () => togglePet(a), `mc-card-desk${out ? ' on' : ''}`));
+  }
+  top.append(iconBtn('edit', `Edit ${a.name}`, () => editAgent(a), 'mc-card-edit'));
   body.append(top);
   if (a.description) body.append(h('div', 'mc-card-role', a.description));
   body.append(activityLine(a));
@@ -926,6 +935,7 @@ function agentMenu(a) {
     }],
     ['Edit', '', () => { setTimeout(() => editAgent(a)); }],
   ];
+  if (shellPets()) actions.push([onDesktop(a.id) ? 'Take off desktop' : 'Put on desktop', '', () => togglePet(a)]);
   if (a.sessionId) actions.push([working ? 'Open chat' : 'Last chat', '', () => openChat(a.sessionId)]);
   if (working) actions.push(['Stop', 'primary', () => stop(a)]);
   else {
@@ -1233,6 +1243,252 @@ function openTicket(t) {
   const { close } = modal(t.title, body, actions);
 }
 
+// ------------------------------------------------------- desktop dwarves
+// In the desktop app a dwarf can be put on the desktop: a small window of its
+// own that stays on top of everything and shows what it is doing. The shell
+// owns that window (a transparent, always-on-top one); this side draws the
+// frames, since the art lives here, and keeps them current. Which dwarves are
+// out, and where they stand, is remembered on this machine.
+
+// Only a shell that says it can: an older Skadi.exe drops these messages
+// without a word, and the button would do nothing.
+const shellPets = () => Boolean(window.__SKADI_PETS__ && window.chrome?.webview);
+const post = (msg) => window.chrome.webview.postMessage(msg);
+const pets = {
+  load() { try { return JSON.parse(store('mission.pets') || '{}') || {}; } catch { return {}; } },
+  save(all) { store('mission.pets', JSON.stringify(all)); },
+  sent: new Map(), // id -> what the shell was last told, so only changes go out
+};
+const onDesktop = (id) => Boolean(pets.load()[id]);
+const petState = (a) => (a.status === 'working' ? 'work' : a.status === 'error' ? 'error' : 'idle');
+
+function petStatus(a) {
+  if (a.status === 'working') {
+    const note = a.note && !/^(Starting|Working in)/.test(a.note) ? ` · ${a.note}` : '';
+    return `${hallOf(a.room).verb || 'Working'}${note}`;
+  }
+  if (a.status === 'error') return 'Needs a hand';
+  return a.note && a.note !== 'On break' ? a.note : 'Resting';
+}
+
+// The desktop dwarf keeps camp: resting, it lays two logs, strikes a flint,
+// watches the fire catch, then sits on a log bench and reads by it -- turning
+// pages, blinking, now and then a sip from its mug. At work it stands by the
+// embers with its room's tool; in trouble, by a cold fire. One 44x30 stage
+// for all of them, so the dwarf does not jump when its state changes.
+const PET_W = 44;
+const PET_H = 30;
+const FEET = ['..DDDD....DDDD..'];
+const CAMP = {
+  seat: R(2, 24, 18, 3, '#8a5a36') + R(2, 24, 18, 1, '#a8744a') + R(2, 24, 1, 3, '#c9a36b') + R(19, 24, 1, 3, '#c9a36b'),
+  stones: R(27, 26, 3, 2, '#6f6873') + R(31, 27, 6, 1, '#8a8390') + R(38, 26, 3, 2, '#6f6873'),
+  log1: R(29, 25, 10, 2, '#8a5a36') + R(29, 25, 10, 1, '#a8744a'),
+  log2: R(31, 23, 2, 4, '#74492b') + R(36, 23, 2, 4, '#74492b') + R(33, 24, 3, 1, '#5d3a22'),
+  glow: '<ellipse cx="34.5" cy="27.5" rx="12" ry="2.2" fill="rgba(255,150,60,.22)"/>',
+  embers: R(32, 24, 5, 1, '#e0572a') + R(34, 24, 1, 1, '#ffcc5c'),
+  flame1: R(33, 23, 3, 2, '#f08a32') + R(34, 23, 1, 1, '#ffcc5c'),
+  flame2: R(32, 21, 5, 4, '#f08a32') + R(33, 22, 3, 3, '#ffcc5c') + R(34, 20, 1, 1, '#f08a32'),
+  // Three shapes of a full fire, cycled so it flickers.
+  flame3: [
+    R(30, 21, 9, 4, '#e0572a') + R(31, 18, 7, 4, '#f08a32') + R(32, 15, 2, 3, '#f08a32') + R(35, 16, 2, 2, '#f08a32') + R(33, 19, 3, 4, '#ffcc5c') + R(34, 21, 1, 2, '#fff1b8'),
+    R(30, 21, 9, 4, '#e0572a') + R(31, 19, 7, 3, '#f08a32') + R(33, 15, 3, 4, '#f08a32') + R(36, 17, 1, 2, '#f08a32') + R(32, 20, 4, 3, '#ffcc5c') + R(34, 20, 1, 3, '#fff1b8'),
+    R(30, 21, 9, 4, '#e0572a') + R(31, 18, 7, 4, '#f08a32') + R(32, 16, 1, 2, '#f08a32') + R(34, 14, 2, 4, '#f08a32') + R(33, 18, 3, 5, '#ffcc5c') + R(34, 21, 2, 2, '#fff1b8'),
+  ],
+  strike: R(30, 22, 1, 1, '#fff1b8') + R(32, 21, 1, 1, '#ffcc5c') + R(31, 20, 1, 1, '#ffd98a'),
+};
+// What the dwarf holds, in its own sprite units (like TOOLS).
+const HELD = {
+  // Lighter than any beard and longer than the dwarf is wide, so it reads as
+  // a log in both hands rather than more beard.
+  log: R(-2, 12, 20, 2, '#c08a52') + R(-2, 13, 20, 1, '#8a5a36') + R(-2, 12, 1, 2, '#ecd3a6') + R(17, 12, 1, 2, '#ecd3a6'),
+  flint: R(14, 14, 2, 1, '#9aa3ad') + R(15, 13, 1, 1, '#e3e8ec'),
+  book: R(3, 10, 10, 4, '#7a3b2e') + R(4, 10, 4, 3, '#f7eedb') + R(8, 10, 4, 3, '#efe2c4') + R(8, 10, 1, 3, '#b89a68') + R(5, 11, 2, 1, '#b8a888') + R(9, 11, 2, 1, '#b8a888'),
+  flip: R(3, 10, 10, 4, '#7a3b2e') + R(4, 10, 4, 3, '#f7eedb') + R(8, 10, 4, 3, '#efe2c4') + R(8, 10, 1, 3, '#b89a68') + R(6, 8, 3, 3, '#fffaf0') + R(5, 11, 1, 1, '#b8a888'),
+  mug: TOOLS.mug,
+  sip: `<g transform="translate(-6 -4)">${TOOLS.mug}</g>`,
+};
+
+/** One moment at camp as SVG. */
+function campSvg(a, o) {
+  const { x = 3, pose = 'stand', legs = 'stand', hold = '', tool = null, raise = false, blink = false,
+    logs = 0, fire = 0, flick = 0, smoke = -1, spark = -1, strike = false } = o;
+  const pal = dwarfPal(a);
+  const rows = a.look === 'girl' ? DWARF_GIRL : DWARF;
+  let s = fire >= 2 ? CAMP.glow : '';
+  s += CAMP.seat + CAMP.stones;
+  if (fire === 3) s += CAMP.flame3[flick % 3];
+  else if (fire === 2) s += CAMP.flame2;
+  if (logs >= 1) s += CAMP.log1;
+  if (logs >= 2) s += CAMP.log2;
+  if (fire === 1) s += CAMP.flame1;
+  if (fire === 0.5) s += CAMP.embers;
+  const y0 = pose === 'sit' ? 8 : pose === 'crouch' ? 11 : 10;
+  const feet = pose === 'sit' ? paint(FEET, pal, 19) : pose === 'crouch' ? paint(FEET, pal, 16) : paint(LEGS[legs], pal, 16);
+  const held = HELD[hold] || (TOOLS[tool] ? `<g transform="translate(0 ${raise ? -1 : 0})">${TOOLS[tool]}</g>` : '');
+  s += `<g transform="translate(${x} ${y0})">${feet}${paint(rows, { ...pal, E: pal.S })}${blink ? '' : paint(rows, { E: pal.E })}${held}</g>`;
+  if (strike) s += CAMP.strike;
+  if (smoke >= 0) s += R(35 + (smoke % 2), 12 - smoke * 2, smoke > 1 ? 2 : 1, 1, 'rgba(190,190,195,.55)');
+  if (spark >= 0) s += R(32 + (spark % 3) * 2, 11 - (spark % 2), 1, 1, '#ffd98a');
+  return s;
+}
+
+/** An SVG stage as PNG base64, one pixel per sprite unit. */
+function petPng(inner) {
+  const svg = `<svg xmlns="${SVGNS}" viewBox="0 0 ${PET_W} ${PET_H}" width="${PET_W}" height="${PET_H}" shape-rendering="crispEdges">${inner}</svg>`;
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = PET_W;
+      c.height = PET_H;
+      const g = c.getContext('2d');
+      g.imageSmoothingEnabled = false;
+      g.drawImage(img, 0, 0, PET_W, PET_H);
+      resolve(c.toDataURL('image/png').split(',')[1]);
+    };
+    img.onerror = () => reject(new Error('Could not draw the dwarf for the desktop.'));
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  });
+}
+
+const beat = (o, ms) => ({ o, ms });
+
+/** Resting: make camp once, then read by the fire for as long as it rests. */
+function campScene() {
+  const intro = [
+    beat({ x: 14 }, 700),
+    beat({ x: 14, hold: 'log' }, 550),
+    beat({ x: 14, logs: 1 }, 400),
+    beat({ x: 14, hold: 'log', logs: 1 }, 550),
+    beat({ x: 14, logs: 2 }, 450),
+    beat({ x: 14, pose: 'crouch', hold: 'flint', logs: 2 }, 400),
+    beat({ x: 14, pose: 'crouch', hold: 'flint', logs: 2, strike: true }, 140),
+    beat({ x: 14, pose: 'crouch', hold: 'flint', logs: 2 }, 220),
+    beat({ x: 14, pose: 'crouch', hold: 'flint', logs: 2, strike: true }, 140),
+    beat({ x: 14, pose: 'crouch', logs: 2, fire: 1 }, 380),
+    beat({ x: 14, pose: 'crouch', logs: 2, fire: 2 }, 380),
+    beat({ x: 14, logs: 2, fire: 3, flick: 0 }, 350),
+    beat({ x: 11, legs: 'a', logs: 2, fire: 3, flick: 1 }, 200),
+    beat({ x: 8, legs: 'b', logs: 2, fire: 3, flick: 2 }, 200),
+    beat({ x: 5, legs: 'a', logs: 2, fire: 3, flick: 0 }, 200),
+    beat({ x: 3, logs: 2, fire: 3, flick: 1 }, 250),
+  ];
+  const loop = [];
+  let i = 0;
+  const sit = (extra = {}, ms = 240) => {
+    loop.push(beat({ x: 3, pose: 'sit', hold: 'book', logs: 2, fire: 3, flick: i % 3, smoke: i % 4, spark: i % 7 === 3 ? i : -1, ...extra }, ms));
+    i++;
+  };
+  const read = (n) => { for (let k = 0; k < n; k++) sit({ blink: i % 11 === 5 }); };
+  read(10);
+  sit({ hold: 'flip' });
+  sit({ hold: 'flip' });
+  read(8);
+  sit({ hold: 'mug' });
+  sit({ hold: 'mug' });
+  sit({ hold: 'sip' });
+  sit({ hold: 'sip' });
+  sit({ hold: 'sip', blink: true });
+  sit({ hold: 'sip' });
+  sit({ hold: 'mug' });
+  read(6);
+  return { beats: [...intro, ...loop], loop: intro.length };
+}
+
+/** Working: its room's tool by the embers. In trouble: by a cold fire. */
+function busyScene(state, tool) {
+  if (state === 'work') return { beats: [beat({ x: 6, logs: 2, fire: 0.5, tool }, 320), beat({ x: 6, logs: 2, fire: 0.5, tool, raise: true }, 320)], loop: 0 };
+  return { beats: [beat({ x: 6, logs: 2 }, 2600), beat({ x: 6, logs: 2, blink: true }, 160)], loop: 0 };
+}
+
+/** A scene as the shell reads it: "png~ms,png~ms,...;loop". */
+async function sceneSpec(a, scene) {
+  const pngs = await Promise.all(scene.beats.map((b) => petPng(campSvg(a, b.o))));
+  return `${pngs.map((png, i) => `${png}~${scene.beats[i].ms}`).join(',')};${scene.loop}`;
+}
+
+/** Bring the shell's desktop dwarves in line with the crew. */
+async function syncPets() {
+  if (!shellPets() || !m.data) return;
+  const all = pets.load();
+  for (const [id, where] of Object.entries(all)) {
+    const a = m.data.agents.find((x) => x.id === id);
+    if (!a) {
+      // Deleted from the crew: it leaves the desktop too.
+      delete all[id];
+      pets.save(all);
+      pets.sent.delete(id);
+      post(`pet:hide|${id}`);
+      continue;
+    }
+    const state = petState(a);
+    const status = petStatus(a);
+    const tool = state === 'work' ? hallOf(a.room).tool || '' : '';
+    // Anything that changes the pictures; a status line alone is a light update.
+    const look = [a.name, a.color, beardOf(a), a.look, tool, state === 'error'].join('/');
+    const last = pets.sent.get(id);
+    if (last && last.look === look && last.status === status && last.state === state) continue;
+    pets.sent.set(id, { look, status, state });
+    if (last?.look === look) {
+      post(`pet:update|${id}|${encodeURIComponent(status)}|${state}`);
+      continue;
+    }
+    try {
+      const [rest, busy] = await Promise.all([
+        sceneSpec(a, campScene()),
+        state === 'idle' ? '' : sceneSpec(a, busyScene(state, tool)),
+      ]);
+      post(['pet:show', id, encodeURIComponent(a.name), encodeURIComponent(status), state,
+        Number.isFinite(where.x) ? where.x : '', Number.isFinite(where.y) ? where.y : '',
+        rest, busy].join('|'));
+    } catch (err) {
+      pets.sent.delete(id);
+      say(err.message);
+    }
+  }
+}
+
+function togglePet(a) {
+  const all = pets.load();
+  if (all[a.id]) {
+    delete all[a.id];
+    pets.sent.delete(a.id);
+    post(`pet:hide|${a.id}`);
+  } else {
+    all[a.id] = {};
+  }
+  pets.save(all);
+  render();
+}
+
+if (shellPets()) {
+  // What happens to a dwarf on the desktop comes back from the shell.
+  window.chrome.webview.addEventListener('message', (e) => {
+    const [cmd, id, x, y] = String(e.data || '').split('|');
+    if (!cmd.startsWith('pet:')) return;
+    const all = pets.load();
+    if (cmd === 'pet:moved' && all[id]) {
+      all[id] = { x: Number(x), y: Number(y) };
+      pets.save(all);
+    } else if (cmd === 'pet:closed') {
+      delete all[id];
+      pets.save(all);
+      pets.sent.delete(id);
+      render();
+    } else if (cmd === 'pet:open') {
+      const a = m.data?.agents.find((ag) => ag.id === id);
+      if (a?.sessionId) openChat(a.sessionId);
+      else show();
+    } else if (cmd === 'pet:mission') {
+      show();
+    }
+  });
+  // Dwarves put out in an earlier run come back with the app.
+  if (Object.keys(pets.load()).length) {
+    api('mission').then((d) => { m.data ??= d; syncPets(); }).catch(() => {});
+  }
+}
+
 // ------------------------------------------------------------- show / hide
 
 async function show() {
@@ -1251,8 +1507,9 @@ function hide() {
   $('centre')?.classList.remove('mission-open');
   $('btnMission')?.classList.remove('active');
 }
-window.skadiMission = { show, hide };
+// Updates ride the app's own event stream (app.js hands them to `update`): a
+// second EventSource held one of the origin's six HTTP/1.1 connections for
+// good, and chat switches queued behind it.
+const update = (data) => { m.data = data; render(); };
+window.skadiMission = { show, hide, update };
 $('btnMission').onclick = () => ($('missionView').hidden ? show() : hide());
-
-const es = new EventSource('/api/events');
-es.addEventListener('mission', (e) => { m.data = JSON.parse(e.data); render(); });

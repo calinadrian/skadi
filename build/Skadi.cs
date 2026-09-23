@@ -16,6 +16,7 @@
 // which loses the integrated title bar but still runs.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -100,7 +101,15 @@ class ShellForm : Form
         Controls.Add(view);
 
         Load += async (s, e) => await Start();
-        FormClosed += (s, e) => { if (ownsServer) Shell.KillTree(server); };
+        // Asked first, so the server can stop what was started from it; forced
+        // only if it does not go. An adopted server is asked too: the job
+        // would kill it the moment this process exits anyway.
+        FormClosed += (s, e) =>
+        {
+            foreach (PetWindow pet in new List<PetWindow>(pets.Values)) pet.Close();
+            bool stopped = Shell.StopGracefully(new Uri(url).Port, ownsServer ? server : null, 10000);
+            if (ownsServer && !stopped) Shell.KillTree(server);
+        };
 
         // A later Skadi.exe launch signals this event instead of creating a
         // second shell. Polling on the UI thread keeps all window operations
@@ -147,13 +156,15 @@ class ShellForm : Form
             if (!string.IsNullOrEmpty(title)) Text = title;
         };
 
-        // Window commands arrive from the page's own title bar.
+        // Window commands arrive from the page's own title bar; desktop dwarves
+        // from Mission Control.
         core.WebMessageReceived += (s, e) =>
         {
             string body;
             try { body = e.TryGetWebMessageAsString(); }
             catch (Exception) { return; }
-            OnWindowCommand(body);
+            if (body != null && body.StartsWith("pet:")) OnPetCommand(body);
+            else OnWindowCommand(body);
         };
 
         // Links that would open a new window go to the user's real browser.
@@ -168,6 +179,8 @@ class ShellForm : Form
         // window controls instead of assuming a browser tab.
         await core.AddScriptToExecuteOnDocumentCreatedAsync(
             "window.__SKADI_SHELL__ = true;" +
+            // Desktop dwarves (PetWindow): older shells ignore the messages.
+            "window.__SKADI_PETS__ = 1;" +
             "window.skadiWindow = {" +
             "  minimize: () => window.chrome.webview.postMessage('minimize')," +
             "  toggleMaximize: () => window.chrome.webview.postMessage('maximize')," +
@@ -211,6 +224,68 @@ class ShellForm : Form
                 BeginTopResize(Native.HTTOPRIGHT);
                 break;
         }
+    }
+
+    // Dwarves on the desktop, by agent id. Not owned by this form: an owned
+    // window hides whenever its owner is minimised, and a desktop dwarf is
+    // meant to stay out while Skadi is tucked away.
+    readonly Dictionary<string, PetWindow> pets = new Dictionary<string, PetWindow>();
+
+    // pet:show|id|name|status|state|x|y|resting scene|busy scene
+    // pet:update|id|status|state      pet:hide|id
+    // Text is URI-encoded; a scene is "png~ms,png~ms,...;loop" (see Frames).
+    void OnPetCommand(string body)
+    {
+        string[] p = body.Split('|');
+        if (p.Length < 2 || p[1].Length == 0) return;
+        string id = p[1];
+        PetWindow pet;
+        pets.TryGetValue(id, out pet);
+        try
+        {
+            switch (p[0])
+            {
+                case "pet:show":
+                    if (p.Length < 9) return;
+                    if (pet == null)
+                    {
+                        pet = new PetWindow(id, SendToPage, ShowShell);
+                        pet.FormClosed += (s, e) => pets.Remove(id);
+                        pets[id] = pet;
+                    }
+                    pet.Apply(Uri.UnescapeDataString(p[2]), Uri.UnescapeDataString(p[3]), p[4],
+                        PetWindow.Frames(p[7]), PetWindow.Frames(p[8]));
+                    if (!pet.Visible) pet.ShowAt(ParseInt(p[5]), ParseInt(p[6]), pets.Count - 1);
+                    break;
+                case "pet:update":
+                    if (pet != null && p.Length >= 4) pet.SetStatus(Uri.UnescapeDataString(p[2]), p[3]);
+                    break;
+                case "pet:hide":
+                    if (pet != null) pet.Remove(false);
+                    break;
+            }
+        }
+        catch (Exception) { /* a malformed message changes nothing */ }
+    }
+
+    static int? ParseInt(string s)
+    {
+        int n;
+        return int.TryParse(s, out n) ? (int?)n : null;
+    }
+
+    void SendToPage(string message)
+    {
+        try { if (view.CoreWebView2 != null) view.CoreWebView2.PostWebMessageAsString(message); }
+        catch (Exception) { /* the page is reloading; it re-sends its dwarves */ }
+    }
+
+    void ShowShell()
+    {
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        Show();
+        BringToFront();
+        Activate();
     }
 
     // The top border was handed to the client area (see WndProc), so the page
@@ -286,6 +361,377 @@ class ShellForm : Form
             return;
         }
         base.WndProc(ref m);
+    }
+}
+
+// A Mission Control dwarf on the desktop: a small window that stays on top of
+// everything and shows one agent and what it is doing. The page draws the
+// sprite frames (the art lives there) and this window only shows them. It is a
+// per-pixel-alpha layered window, so the dwarf stands on the desktop with no
+// box around it and clicks on its empty pixels reach whatever is underneath.
+// Drag to move, double-click to open its chat, right-click for a menu.
+class PetWindow : Form
+{
+    [StructLayout(LayoutKind.Sequential)]
+    struct PT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SZ { public int W, H; }
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    struct BLEND { public byte Op, Flags, Alpha, Format; }
+
+    [DllImport("user32.dll")]
+    static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref PT pptDst, ref SZ psize,
+        IntPtr hdcSrc, ref PT pptSrc, int crKey, ref BLEND pblend, int dwFlags);
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+
+    const int WS_EX_LAYERED = 0x80000;
+    const int WS_EX_TOOLWINDOW = 0x80;
+    const int WS_EX_TOPMOST = 0x8;
+    const int ULW_ALPHA = 2;
+
+    public readonly string Id;
+    readonly Action<string> send;
+    readonly Action showShell;
+    readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+    readonly ContextMenuStrip menu = new ContextMenuStrip();
+    readonly ToolStripMenuItem openItem = new ToolStripMenuItem();
+    // Resting (the campfire scene) and busy (working, or in trouble).
+    Sequence idle = Sequence.Empty, busy = Sequence.Empty;
+    Sequence playing = null;
+    int frame;
+    DateTime frameUntil;
+    string petName = "", status = "", state = "idle", drawn = null;
+    // Where the window is and how wide it was last drawn. UpdateLayeredWindow
+    // moves and sizes the window itself, so these are kept here rather than
+    // read back from the form's cached bounds.
+    int px, py, pw;
+    bool pressed, dragged, removing;
+    Point press;
+    DateTime lastClick = DateTime.MinValue;
+
+    public PetWindow(string id, Action<string> send, Action showShell)
+    {
+        Id = id;
+        this.send = send;
+        this.showShell = showShell;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        TopMost = true;
+        MaximizeBox = false;
+        MinimizeBox = false;
+
+        openItem.Click += (s, e) => Open();
+        var mission = new ToolStripMenuItem("Open Mission Control");
+        mission.Click += (s, e) => { showShell(); send("pet:mission|" + Id); };
+        var remove = new ToolStripMenuItem("Remove from desktop");
+        remove.Click += (s, e) => Remove(true);
+        menu.Items.AddRange(new ToolStripItem[] { openItem, mission, new ToolStripSeparator(), remove });
+
+        // Frames carry their own durations; the timer only checks whether the
+        // current one is up, and nothing is redrawn while it is not.
+        timer.Interval = 50;
+        timer.Tick += (s, e) => Redraw();
+        timer.Start();
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+            return cp;
+        }
+    }
+
+    /// An animation: frames with how long each shows, played once from the
+    /// start and then looped from `Loop` -- so a scene can set itself up
+    /// (build the fire) and then idle in place (read by it).
+    public class Sequence
+    {
+        public static readonly Sequence Empty = new Sequence(new Bitmap[0], new int[0], 0);
+        public readonly Bitmap[] Frames;
+        public readonly int[] Ms;
+        public readonly int Loop;
+        public Sequence(Bitmap[] frames, int[] ms, int loop)
+        {
+            Frames = frames;
+            Ms = ms;
+            Loop = Math.Max(0, Math.Min(loop, Math.Max(0, frames.Length - 1)));
+        }
+        public void Dispose() { foreach (Bitmap b in Frames) b.Dispose(); }
+    }
+
+    /// "png~ms,png~ms,...;loop" -- PNG base64, how long it shows, where the loop starts.
+    public static Sequence Frames(string spec)
+    {
+        string[] halves = spec.Split(';');
+        var frames = new List<Bitmap>();
+        var ms = new List<int>();
+        foreach (string item in halves[0].Split(','))
+        {
+            if (item.Length == 0) continue;
+            string[] parts = item.Split('~');
+            int duration;
+            if (parts.Length < 2 || !int.TryParse(parts[1], out duration)) duration = 400;
+            using (var stream = new MemoryStream(Convert.FromBase64String(parts[0])))
+            using (var img = Image.FromStream(stream))
+                frames.Add(new Bitmap(img));
+            ms.Add(Math.Max(40, duration));
+        }
+        int loop = 0;
+        if (halves.Length > 1) int.TryParse(halves[1], out loop);
+        return new Sequence(frames.ToArray(), ms.ToArray(), loop);
+    }
+
+    public void Apply(string name, string status, string state, Sequence idle, Sequence busy)
+    {
+        this.idle.Dispose();
+        this.busy.Dispose();
+        petName = name;
+        this.idle = idle;
+        this.busy = busy;
+        playing = null; // new art: start its scene from the top
+        openItem.Text = "Open " + name;
+        drawn = null;
+        SetStatus(status, state);
+    }
+
+    public void SetStatus(string status, string state)
+    {
+        this.status = status;
+        this.state = state;
+        Redraw();
+    }
+
+    /// First appearance: where it last stood if that is still on a screen,
+    /// otherwise lined up along the bottom right of the main screen.
+    public void ShowAt(int? x, int? y, int index)
+    {
+        Rectangle area = Screen.PrimaryScreen.WorkingArea;
+        Point at = new Point(area.Right - 180 - index * 130, area.Bottom - 190);
+        if (x.HasValue && y.HasValue)
+        {
+            var saved = new Point(x.Value, y.Value);
+            foreach (Screen s in Screen.AllScreens)
+            {
+                if (s.WorkingArea.Contains(new Point(saved.X + 40, saved.Y + 40))) { at = saved; break; }
+            }
+        }
+        px = at.X;
+        py = at.Y;
+        pw = 0;
+        Location = at;
+        Show();
+        drawn = null;
+        Redraw();
+    }
+
+    public void Remove(bool tellPage)
+    {
+        if (removing) return;
+        removing = true;
+        if (tellPage) send("pet:closed|" + Id);
+        Close();
+    }
+
+    void Open()
+    {
+        showShell();
+        send("pet:open|" + Id);
+    }
+
+    int SpriteScale()
+    {
+        uint dpi = 96;
+        try { if (IsHandleCreated) dpi = Native.GetDpiForWindow(Handle); } catch (Exception) { }
+        if (dpi == 0) dpi = 96;
+        return Math.Max(2, (int)Math.Round(4 * dpi / 96.0));
+    }
+
+    void Redraw()
+    {
+        if (!IsHandleCreated || !Visible) return;
+        Sequence set = state != "idle" && busy.Frames.Length > 0 ? busy : idle;
+        DateTime now = DateTime.UtcNow;
+        if (set != playing)
+        {
+            // A change of state starts that scene over: coming back to rest
+            // means building the fire again.
+            playing = set;
+            frame = 0;
+            frameUntil = set.Frames.Length > 0 ? now.AddMilliseconds(set.Ms[0]) : DateTime.MaxValue;
+        }
+        else if (set.Frames.Length > 1 && now >= frameUntil)
+        {
+            frame = frame + 1 < set.Frames.Length ? frame + 1 : set.Loop;
+            frameUntil = now.AddMilliseconds(set.Ms[frame]);
+        }
+        int scale = SpriteScale();
+        string key = frame + "|" + scale + "|" + state + "|" + status + "|" + petName + "|" + set.Frames.Length;
+        if (key == drawn) return;
+        drawn = key;
+        using (Bitmap bmp = Compose(set.Frames.Length > 0 ? set.Frames[frame] : null, scale))
+            Present(bmp);
+    }
+
+    Bitmap Compose(Bitmap frame, int scale)
+    {
+        float unit = scale / 4f;
+        int spriteW = frame != null ? frame.Width * scale : 0;
+        int spriteH = frame != null ? frame.Height * scale : 0;
+        string line = status.Length > 44 ? status.Substring(0, 43) + "\u2026" : status;
+        using (var nameFont = new Font("Segoe UI", 12f * unit, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var textFont = new Font("Segoe UI", 11f * unit, FontStyle.Regular, GraphicsUnit.Pixel))
+        using (var probe = new Bitmap(1, 1))
+        using (var pg = Graphics.FromImage(probe))
+        {
+            SizeF nameSize = pg.MeasureString(petName, nameFont);
+            SizeF textSize = pg.MeasureString(line, textFont);
+            int pad = (int)(8 * unit), dot = (int)(7 * unit);
+            int pillW = (int)Math.Ceiling(Math.Max(nameSize.Width + dot + pad / 2, textSize.Width)) + pad * 2;
+            int pillH = (int)Math.Ceiling(nameSize.Height + textSize.Height) + pad;
+            int w = Math.Max(spriteW, pillW) + 2, h = spriteH + pillH + 2;
+            var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                if (frame != null)
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                    g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                    g.DrawImage(frame, new Rectangle((w - spriteW) / 2, 0, spriteW, spriteH));
+                }
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                var pill = new RectangleF((w - pillW) / 2f, spriteH, pillW, pillH);
+                using (var path = Rounded(pill, 8 * unit))
+                using (var fill = new SolidBrush(Color.FromArgb(225, 24, 20, 22)))
+                using (var edge = new Pen(Color.FromArgb(90, 255, 255, 255), 1))
+                {
+                    g.FillPath(fill, path);
+                    g.DrawPath(edge, path);
+                }
+                Color tone = state == "work" ? Color.FromArgb(120, 214, 120)
+                    : state == "error" ? Color.FromArgb(240, 110, 100) : Color.FromArgb(150, 150, 150);
+                float nx = pill.X + pad, ny = pill.Y + pad / 2f;
+                using (var dotBrush = new SolidBrush(tone))
+                    g.FillEllipse(dotBrush, nx, ny + (nameSize.Height - dot) / 2f, dot, dot);
+                using (var ink = new SolidBrush(Color.FromArgb(245, 240, 232)))
+                    g.DrawString(petName, nameFont, ink, nx + dot + pad / 2f, ny);
+                using (var dim = new SolidBrush(Color.FromArgb(190, 185, 178)))
+                    g.DrawString(line, textFont, dim, nx, ny + nameSize.Height);
+            }
+            return bmp;
+        }
+    }
+
+    static System.Drawing.Drawing2D.GraphicsPath Rounded(RectangleF r, float radius)
+    {
+        float d = radius * 2;
+        var path = new System.Drawing.Drawing2D.GraphicsPath();
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d - 1, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d - 1, r.Bottom - d - 1, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d - 1, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    // Hand the finished picture to Windows. Keeps the dwarf's feet where they
+    // were when the label under it grows or shrinks.
+    void Present(Bitmap bmp)
+    {
+        if (pw > 0) px += (pw - bmp.Width) / 2;
+        pw = bmp.Width;
+        IntPtr screen = GetDC(IntPtr.Zero);
+        IntPtr mem = CreateCompatibleDC(screen);
+        IntPtr hbmp = IntPtr.Zero, old = IntPtr.Zero;
+        try
+        {
+            hbmp = bmp.GetHbitmap(Color.FromArgb(0));
+            old = SelectObject(mem, hbmp);
+            var size = new SZ { W = bmp.Width, H = bmp.Height };
+            var src = new PT { X = 0, Y = 0 };
+            var dst = new PT { X = px, Y = py };
+            var blend = new BLEND { Op = 0, Flags = 0, Alpha = 255, Format = 1 };
+            UpdateLayeredWindow(Handle, screen, ref dst, ref size, mem, ref src, 0, ref blend, ULW_ALPHA);
+        }
+        finally
+        {
+            if (old != IntPtr.Zero) SelectObject(mem, old);
+            if (hbmp != IntPtr.Zero) DeleteObject(hbmp);
+            DeleteDC(mem);
+            ReleaseDC(IntPtr.Zero, screen);
+        }
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        pressed = true;
+        dragged = false;
+        press = e.Location;
+        Capture = true;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        if (!pressed) return;
+        if (!dragged && Math.Abs(e.X - press.X) + Math.Abs(e.Y - press.Y) < 4) return;
+        dragged = true;
+        Point p = Cursor.Position;
+        px = p.X - press.X;
+        py = p.Y - press.Y;
+        Location = new Point(px, py);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Right)
+        {
+            menu.Show(this, e.Location);
+            return;
+        }
+        if (!pressed) return;
+        pressed = false;
+        Capture = false;
+        if (dragged)
+        {
+            send("pet:moved|" + Id + "|" + px + "|" + py);
+            return;
+        }
+        if ((DateTime.Now - lastClick).TotalMilliseconds <= SystemInformation.DoubleClickTime)
+        {
+            lastClick = DateTime.MinValue;
+            Open();
+        }
+        else lastClick = DateTime.Now;
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        drawn = null;
+        Redraw();
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        timer.Stop();
+        timer.Dispose();
+        menu.Dispose();
+        idle.Dispose();
+        busy.Dispose();
+        base.OnFormClosed(e);
     }
 }
 
@@ -612,6 +1058,33 @@ static class Shell
         return "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
+    /// Ask the server to shut itself down and wait for it to go. On the way
+    /// out it stops the dev servers and apps started from Skadi -- programs a
+    /// forced kill of its tree cannot reach once their launching shell has
+    /// exited. Returns false if it could not be asked or did not exit in time.
+    public static bool StopGracefully(int port, Process process, int timeoutMs)
+    {
+        if (process == null)
+        {
+            int pid = ServingPid(port);
+            try { if (pid > 0) process = Process.GetProcessById(pid); } catch (Exception) { }
+        }
+        if (process == null || process.HasExited) return true;
+        try
+        {
+            var request = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + "/api/shutdown");
+            request.Method = "POST";
+            request.ContentType = "application/json";
+            request.Timeout = 2000;
+            byte[] body = Encoding.UTF8.GetBytes("{}");
+            request.ContentLength = body.Length;
+            using (Stream stream = request.GetRequestStream()) stream.Write(body, 0, body.Length);
+            using (request.GetResponse()) { }
+        }
+        catch (Exception) { return false; }
+        try { return process.WaitForExit(timeoutMs); } catch (Exception) { return false; }
+    }
+
     public static void KillTree(Process process)
     {
         if (process == null || process.HasExited) return;
@@ -811,7 +1284,7 @@ static class Shell
             return 6;
         }
 
-        if (weStartedIt) KillTree(child);
+        if (weStartedIt && !StopGracefully(port, child, 10000)) KillTree(child);
         return 0;
     }
 }

@@ -547,7 +547,14 @@ function renderMarkdown(src) {
 // up and it stays where you put it; "Jump to latest" appears while there is
 // newer output below.
 let pinned = true;
+// Set while a whole transcript is drawn at once (openSession). Every bubble
+// and tool card scrolls down as it is added, and each scroll reads
+// scrollHeight -- a forced layout of everything drawn so far. Over a long
+// agent chat that is hundreds of full layouts: the window froze on switching
+// chats. The bulk render scrolls once, at the end, instead.
+let bulkRender = false;
 function scrollDown(force) {
+  if (bulkRender) return;
   const box = $('messages');
   if (force) pinned = true;
   if (!pinned) {
@@ -2501,10 +2508,20 @@ function openBrowserStream() {
   const es = new EventSource(`/api/browser/stream?session=${encodeURIComponent(key)}`);
   state.browserStream = es;
 
+  // An animating page sends frames faster than they can be decoded; paint
+  // only the newest one, once per display frame, instead of queueing them all.
+  let pending = null;
   es.addEventListener('frame', (e) => {
-    const { data } = JSON.parse(e.data);
-    $('browserFrame').src = `data:image/jpeg;base64,${data}`;
-    $('browserEmpty').hidden = true;
+    const first = pending === null;
+    pending = e.data;
+    if (!first) return;
+    requestAnimationFrame(() => {
+      const raw = pending;
+      pending = null;
+      if (state.browserStream !== es) return;
+      $('browserFrame').src = `data:image/jpeg;base64,${JSON.parse(raw).data}`;
+      $('browserEmpty').hidden = true;
+    });
   });
   es.addEventListener('console', (e) => addConsoleEntry(JSON.parse(e.data)));
   es.addEventListener('console_history', (e) => setConsoleEntries(JSON.parse(e.data).entries || []));
@@ -4984,9 +5001,16 @@ function contentToThumbs(content) {
   return wrap;
 }
 
+// Which openSession call is the latest. Clicking through the rail quickly
+// starts several; only the last one may draw, or a slow earlier fetch lands
+// on top of the chat that was actually picked.
+let openSeq = 0;
+
 async function openSession(id) {
   window.skadiMission?.hide();
+  const seq = ++openSeq;
   const session = await api(`session?id=${encodeURIComponent(id)}`);
+  if (seq !== openSeq) return;
   // Nothing below can run without a transcript, and everything below has
   // already changed the window when it finds that out. A chat deleted from
   // another window, a half-written file, an endpoint that answered with
@@ -5043,61 +5067,66 @@ async function openSession(id) {
   const cards = new Map();
   // The last card that touched each pixel art canvas: its picture goes there.
   const pixelCards = new Map();
-  for (const [messageIndex, m] of session.messages.entries()) {
-    if (m.role === 'system') continue;
-    const anchor = el('span', 'message-anchor');
-    anchor.dataset.messageIndex = String(messageIndex);
-    $('messages').append(anchor);
+  bulkRender = true;
+  try {
+    for (const [messageIndex, m] of session.messages.entries()) {
+      if (m.role === 'system') continue;
+      const anchor = el('span', 'message-anchor');
+      anchor.dataset.messageIndex = String(messageIndex);
+      $('messages').append(anchor);
 
-    if (m.role === 'tool') {
-      const card = cards.get(m.tool_call_id);
-      const ok = !String(m.content ?? '').startsWith('Error:');
-      if (card) {
-        card.classList.remove('pending');
-        card.classList.add(ok ? 'ok' : 'err');
-        fillToolOutput(card.querySelector('.out'), m.content, card.dataset.path);
-        updateFileChip(card, { content: m.content });
-        if (ok && /^pixel_(new|draw|view|import)$/.test(card.dataset.tool || '')) {
-          const named = card._args?.name || /"([A-Za-z0-9_-]{1,40})"/.exec(String(m.content ?? ''))?.[1];
-          if (named) pixelCards.set(named, card);
+      if (m.role === 'tool') {
+        const card = cards.get(m.tool_call_id);
+        const ok = !String(m.content ?? '').startsWith('Error:');
+        if (card) {
+          card.classList.remove('pending');
+          card.classList.add(ok ? 'ok' : 'err');
+          fillToolOutput(card.querySelector('.out'), m.content, card.dataset.path);
+          updateFileChip(card, { content: m.content });
+          if (ok && /^pixel_(new|draw|view|import)$/.test(card.dataset.tool || '')) {
+            const named = card._args?.name || /"([A-Za-z0-9_-]{1,40})"/.exec(String(m.content ?? ''))?.[1];
+            if (named) pixelCards.set(named, card);
+          }
+        } else {
+          addTool('result', null, { content: m.content, ok });
         }
-      } else {
-        addTool('result', null, { content: m.content, ok });
+        continue;
       }
-      continue;
-    }
 
-    if (m.role === 'assistant' && m.tool_calls) {
-      // Text first, then the calls it introduced -- the order it streamed in.
-      if (m.content) addMessage('assistant', contentToText(m.content));
-      for (const c of m.tool_calls) {
-        const card = addTool(c.function.name, safeJson(c.function.arguments), null);
-        card.dataset.callId = c.id;
-        // A repeated step the model no longer sees: kept in place, dimmed.
-        if (m.aside) card.classList.add('aside');
-        cards.set(c.id, card);
+      if (m.role === 'assistant' && m.tool_calls) {
+        // Text first, then the calls it introduced -- the order it streamed in.
+        if (m.content) addMessage('assistant', contentToText(m.content));
+        for (const c of m.tool_calls) {
+          const card = addTool(c.function.name, safeJson(c.function.arguments), null);
+          card.dataset.callId = c.id;
+          // A repeated step the model no longer sees: kept in place, dimmed.
+          if (m.aside) card.classList.add('aside');
+          cards.set(c.id, card);
+        }
+        continue;
       }
-      continue;
+      const body = addMessage(m.role, contentToText(m.content), contentToThumbs(m.content));
+      // An answer a finish gate sent back: shown where it happened, marked.
+      if (m.aside && m.role === 'assistant') body.closest('.msg')?.classList.add('superseded');
     }
-    const body = addMessage(m.role, contentToText(m.content), contentToThumbs(m.content));
-    // An answer a finish gate sent back: shown where it happened, marked.
-    if (m.aside && m.role === 'assistant') body.closest('.msg')?.classList.add('superseded');
+    // Each canvas this chat painted, as it stands now, after its last step.
+    for (const [name, card] of pixelCards) {
+      const anchor = card.closest('.tool-group') || card;
+      const figure = pixelFigure(name);
+      const img = figure.querySelector('img');
+      img.onload = () => { img.width = img.naturalWidth; img.height = img.naturalHeight; scrollDown(); };
+      img.src = `/api/pixel/png?session=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`;
+      figure.querySelector('figcaption').textContent = name;
+      anchor.after(figure);
+      pixelFigures.set(`${id}:${name}`, figure);
+    }
+    // Reopening a chat whose turn is still running: the saved transcript stops
+    // at the user's message, so put the live part back on screen rather than
+    // leaving the answer to reappear only once the turn ends.
+    replayLive(id);
+  } finally {
+    bulkRender = false;
   }
-  // Each canvas this chat painted, as it stands now, after its last step.
-  for (const [name, card] of pixelCards) {
-    const anchor = card.closest('.tool-group') || card;
-    const figure = pixelFigure(name);
-    const img = figure.querySelector('img');
-    img.onload = () => { img.width = img.naturalWidth; img.height = img.naturalHeight; scrollDown(); };
-    img.src = `/api/pixel/png?session=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`;
-    figure.querySelector('figcaption').textContent = name;
-    anchor.after(figure);
-    pixelFigures.set(`${id}:${name}`, figure);
-  }
-  // Reopening a chat whose turn is still running: the saved transcript stops
-  // at the user's message, so put the live part back on screen rather than
-  // leaving the answer to reappear only once the turn ends.
-  replayLive(id);
   syncBusy();
   renderOutcomeBar();
   refreshWorkflow(id).catch(() => {});
@@ -5533,6 +5562,8 @@ function connect() {
   es.addEventListener('download', (e) => onDownloadEvent(JSON.parse(e.data).job));
   es.addEventListener('models_changed', () => refreshModels());
   es.addEventListener('share_status', (e) => { share.status = JSON.parse(e.data); renderShare(); });
+  // Mission Control listens here rather than on a stream of its own.
+  es.addEventListener('mission', (e) => window.skadiMission?.update?.(JSON.parse(e.data)));
   // Profiles came or went on the server -- a model's default settings were
   // dropped on eject, or saved. Take its word for what exists now.
   es.addEventListener('profiles_changed', async (e) => {
@@ -5674,7 +5705,9 @@ function connect() {
     // Watching the agent drive the page is the point of the browser pane.
     // It docks beside the chat; the turn stays visible, and focus is left
     // alone so typing in the composer is never interrupted.
-    if (d.name.startsWith('browser_') && !isBrowserOpen()) setBrowserOpen(true);
+    // Only for the chat on screen: the pane shows this chat's browser, so a
+    // dwarf browsing in the background would open it on the wrong page.
+    if (isPendingView(d.sessionId) && d.name.startsWith('browser_') && !isBrowserOpen()) setBrowserOpen(true);
   });
 
   es.addEventListener('agent_tool_result', (e) => {

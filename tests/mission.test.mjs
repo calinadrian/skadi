@@ -15,6 +15,25 @@ test('parseTickets tolerates junk', () => {
   assert.deepEqual(parseTickets('```tickets\n[not json]\n```'), []);
 });
 
+test('parseTickets forgives the ways models actually write the block', () => {
+  // A "]" inside a string, a trailing comma and a ```json fence.
+  const text = 'I identified 2 tickets.\n```json\n[\n {"title":"Support [x] syntax","summary":"a"},\n {"title":"Cache results","plain":"faster","priority":"low"},\n]\n```\nThanks!';
+  assert.deepEqual(parseTickets(text).map((t) => t.title), ['Support [x] syntax', 'Cache results']);
+  // Wrapped in an object, fence with no language.
+  assert.deepEqual(parseTickets('```\n{"tickets":[{"title":"Add dark mode","summary":"s"}]}\n```').map((t) => t.title), ['Add dark mode']);
+  // Bare array in prose, no fence at all.
+  assert.deepEqual(parseTickets('Findings: [{"title":"Fix crash","details":"on empty input"}] done').map((t) => t.title), ['Fix crash']);
+  // The last block that holds tickets wins over an unrelated later one.
+  assert.deepEqual(parseTickets('```tickets\n[{"title":"Real one","summary":"s"}]\n```\n```js\nconst x = [1];\n```').map((t) => t.title), ['Real one']);
+});
+
+test('parseTickets ignores quoted JSON that is not ticket-shaped', () => {
+  // Search results or API output with a title field are not tickets...
+  assert.deepEqual(parseTickets('The API returned:\n```json\n[{"title":"Issue 12","url":"https://x"}]\n```'), []);
+  // ...unless the model put them in a tickets block itself.
+  assert.deepEqual(parseTickets('```tickets\n[{"title":"Only a title"}]\n```').map((t) => t.title), ['Only a title']);
+});
+
 test('development brief lists approved tickets; store round-trips', () => {
   const store = new MissionStore(join(mkdtempSync(join(tmpdir(), 'mc-')), 'mission.json'));
   const agent = store.upsertAgent({ name: 'Inky', description: 'dev' });

@@ -52,19 +52,79 @@ Budget: ${budget}` : ''}`;
   }
 }
 
-/** Tickets from the fenced ```tickets block (or the last JSON array) of a report. */
+/** The text of a chat message, whether its content is a string or blocks. */
+export function messageText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
+}
+
+// Every top-level JSON array of objects in free text, found by matching
+// brackets outside strings: a regex stops at the first "]" in a title.
+function bareArrays(src) {
+  const out = [];
+  for (let i = src.indexOf('['); i !== -1; i = src.indexOf('[', i + 1)) {
+    if (!/^\[\s*\{/.test(src.slice(i, i + 64))) continue;
+    let depth = 0;
+    let str = false;
+    for (let j = i; j < src.length; j++) {
+      const c = src[j];
+      if (str) {
+        if (c === '\\') j++;
+        else if (c === '"') str = false;
+      } else if (c === '"') str = true;
+      else if (c === '[' || c === '{') depth++;
+      else if ((c === ']' || c === '}') && --depth === 0) {
+        out.push(src.slice(i, j + 1));
+        i = j;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Ticket rows from one JSON candidate. Models add trailing commas and wrap
+// the list in {"tickets": [...]}; both still count.
+function ticketRows(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  let data;
+  try { data = JSON.parse(text); } catch {
+    try { data = JSON.parse(text.replace(/,\s*([\]}])/g, '$1')); } catch { return []; }
+  }
+  if (Array.isArray(data?.tickets)) data = data.tickets;
+  if (data && !Array.isArray(data) && typeof data === 'object' && data.title) data = [data];
+  return Array.isArray(data) ? data : [];
+}
+
+/**
+ * Tickets from a report: the last fenced block that holds any (```tickets,
+ * ```json or bare), else the last JSON array of objects in the text.
+ */
 export function parseTickets(text) {
   const src = String(text || '');
-  const fenced = [...src.matchAll(/```(?:tickets|json)?\s*(\[[\s\S]*?\])\s*```/g)].pop()?.[1];
-  const raw = fenced ?? src.match(/\[\s*\{[\s\S]*\}\s*\]/)?.[0];
-  if (!raw) return [];
-  let rows;
-  try { rows = JSON.parse(raw); } catch { return []; }
-  if (!Array.isArray(rows)) return [];
+  const fences = [...src.matchAll(/```(\w*)\s*([\s\S]*?)```/g)].reverse();
+  // Outside a ```tickets fence a row must look like a ticket, not just any
+  // quoted JSON that happens to have a title (search results, API output).
+  const candidates = [
+    ...fences.map(([, lang, body]) => ({ body, strict: lang.toLowerCase() !== 'tickets' })),
+    ...bareArrays(src).reverse().map((body) => ({ body, strict: true })),
+  ];
+  for (const { body, strict } of candidates) {
+    const rows = ticketRows(body).filter((r) => r && typeof r === 'object'
+      && String(r.title ?? '').trim() && (!strict || r.summary || r.plain || r.details));
+    if (rows.length) return normalizeTickets(rows);
+  }
+  return [];
+}
+
+/** Ticket rows cleaned up for filing: clipped fields, a known priority. */
+export function normalizeTickets(rows) {
   const clip = (v, n) => String(v ?? '').trim().slice(0, n);
-  return rows
+  return (Array.isArray(rows) ? rows : [])
     .filter((r) => r && typeof r === 'object' && clip(r.title, 200))
-    .slice(0, 12)
+    .slice(0, 50)
     .map((r) => ({
       title: clip(r.title, 200),
       plain: clip(r.plain, 400),

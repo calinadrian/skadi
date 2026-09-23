@@ -13,6 +13,8 @@ import { createInterface } from 'node:readline';
 import { unifiedDiff, statLine } from './diff.mjs';
 import { ROOT } from './config.mjs';
 import { PlanNotice, planText, planToolResult } from './plans.mjs';
+import { trackProcess } from './processes.mjs';
+import { movePortsIfTaken, movedPortsNote } from './ports.mjs';
 
 /**
  * Kill a spawned shell and whatever it started. `child.kill()` alone only
@@ -20,7 +22,7 @@ import { PlanNotice, planText, planToolResult } from './plans.mjs';
  * `Start-Process node ...`, or a detached dev server) is not part of that
  * process and survives, becoming an orphan that keeps a port bound.
  */
-function killTree(child) {
+export function killTree(child) {
   if (!child.pid) return;
   if (process.platform === 'win32') {
     spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -175,7 +177,8 @@ const SERVER_COMMAND = new RegExp(
     String.raw`\bnpx\s+(vite|next\s+dev|serve|http-server|live-server)\b`,
     String.raw`^\s*(vite|http-server|live-server|serve)\b`,
     String.raw`\bnext\s+dev\b`,
-    String.raw`\bpython3?\s+-m\s+http\.server\b`,
+    // python, py, or Start-Process with 'http.server' in its argument list.
+    String.raw`\bhttp\.server\b`,
     String.raw`\b(flask\s+run|uvicorn\s|php\s+-S\s|manage\.py\s+runserver)`,
   ].join('|'),
   'i',
@@ -791,6 +794,16 @@ export function buildTools(ctx) {
         const root = resolve(ctx.workspace);
         // Windows PowerShell 5.1 refuses && and || outright; cmd has them.
         if (shell !== 'cmd') command = chainForPowerShell(command);
+        // A server started on a taken port fails, or seems to work while the
+        // page shows whatever held the port first. Move it to a free one.
+        let portNote = '';
+        if (looksLikeServer(command)) {
+          const { command: freed, moved } = await movePortsIfTaken(command);
+          if (moved.length) {
+            command = freed;
+            portNote = `${movedPortsNote(moved)}\n`;
+          }
+        }
         // A dev server never exits: in the foreground it would hold the turn
         // until the timeout killed it. Such commands go to the background.
         const server = !background && ctx.startBackground && looksLikeServer(command);
@@ -800,6 +813,7 @@ export function buildTools(ctx) {
         if (background && ctx.startBackground) {
           const task = ctx.startBackground({ command, shell });
           return (
+            portNote +
             (server ? 'This looks like a server that keeps running, so it was started in the background.\n' : '') +
             `Started background task ${task.id}: ${command}\n` +
             `It keeps running while you continue. Read its output anytime with task_log (task_id "${task.id}"); ` +
@@ -829,6 +843,8 @@ export function buildTools(ctx) {
             windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe'],
           });
+          // Whatever this starts and leaves running stops when Skadi does.
+          trackProcess(child.pid);
           let out = '';
           const append = (d) => {
             out += d;
@@ -862,7 +878,7 @@ export function buildTools(ctx) {
             clearTimeout(timer);
             meta.signal?.removeEventListener('abort', onAbort);
             const hint = isCmd ? '' : unixHabitHint(out);
-            const base = `exit code ${code}\n${out.trim() || '(no output)'}${hint ? `\n\n${hint}` : ''}`;
+            const base = `${portNote}exit code ${code}\n${out.trim() || '(no output)'}${hint ? `\n\n${hint}` : ''}`;
             let changes = [];
             if (before) {
               try {

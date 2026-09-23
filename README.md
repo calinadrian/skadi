@@ -113,6 +113,10 @@ ships with Windows 11. Chrome, Brave or Edge is used for the review browser.
   CSS and game code — including sprite sheets and autotile sets. Built to work
   with small local models. The approach is ported from
   [Texel Studio](https://github.com/EYamanS/texel-studio).
+- **Servers that behave.** A dev server started on a port that is already taken
+  is moved to a free one, and the agent is told which. Closing Skadi stops the
+  servers and apps its commands started, including ones launched with
+  `Start-Process` that outlived their shell.
 - **Permission modes** from *Manual* to *Auto*, so you decide what runs unasked.
 - **Undo and redo** every file a chat wrote — one file, or the whole chat.
 - **A live execution plan** for substantial work. The agent keeps one step active

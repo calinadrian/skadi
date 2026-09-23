@@ -20,6 +20,8 @@ import { buildWebSearchTools } from './web-search.mjs';
 import { LocalSearxng } from './searxng.mjs';
 import { listDirectory, readProjectFile, findFiles } from './files.mjs';
 import { TaskManager } from './tasks.mjs';
+import { stopTrackedProcesses } from './processes.mjs';
+import { portInUse } from './ports.mjs';
 import { gitStatus, gitDiff } from './git.mjs';
 import { SkillStore, skillTools, skillCatalogue, seedBundledSkills, autoSkills, quickStart, bundledSkillStatus, restoreBundledSkill } from './skills.mjs';
 import { PixelStudio } from './pixelart.mjs';
@@ -53,7 +55,7 @@ import {
 } from './providers.mjs';
 import { progressReviewInput, progressReviewPrompt, parseProgressReview } from './progress-review.mjs';
 import { delegationPrompt, parseDelegation } from './delegation.mjs';
-import { MissionStore, ROOMS, roomBrief, parseTickets } from './mission.mjs';
+import { MissionStore, ROOMS, roomBrief, parseTickets, normalizeTickets, messageText } from './mission.mjs';
 import { loadProjects, activeProject, addProject, removeProject, selectProject, projectSummary, projectsWithStatus } from './projects.mjs';
 import { storeAttachment, attachmentsToBlocks, describeAttachments } from './attachments.mjs';
 import { AgentBrowser, browserTools, SHOTS_DIR, VIEWPORT, profileDirFor } from './browser.mjs';
@@ -1471,12 +1473,22 @@ export class Skadi {
     return raw.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'draft';
   }
 
-  /** The lowest debugging port no live browser is already using. */
-  browserPort() {
-    const taken = new Set([...this.browsers.values()].map((b) => b.port));
-    let port = 9333;
-    while (taken.has(port)) port += 1;
-    return port;
+  /**
+   * The lowest debugging port nothing is using -- neither one of our browsers
+   * nor another program. A Chromium launched onto a port someone else holds
+   * cannot listen there, and Skadi would attach to whatever does.
+   */
+  async browserPort() {
+    // Claimed before the check is awaited, so two chats opening browsers at
+    // once cannot both settle on the same free port.
+    this.browserPortsClaimed ??= new Set();
+    for (let port = 9333; port < 65535; port++) {
+      if (this.browserPortsClaimed.has(port) || [...this.browsers.values()].some((b) => b.port === port)) continue;
+      this.browserPortsClaimed.add(port);
+      if (!(await portInUse(port))) return port;
+      this.browserPortsClaimed.delete(port);
+    }
+    throw new Error('no free port for the browser');
   }
 
   /**
@@ -1487,8 +1499,11 @@ export class Skadi {
   async evictBrowsers(keep) {
     const cap = Number(this.settings.maxBrowsers ?? 4);
     if (!cap || cap < 1) return;
+    // Never one a running turn is driving (a Mission Control agent working in
+    // the background, say): closing it would fail the agent's next step.
+    const busy = new Set([...this.turns.keys(), ...this.subagents.keys()].map((id) => this.browserKey(id)));
     const candidates = [...this.browsers.entries()]
-      .filter(([key]) => key !== keep && !this.browserClients.get(key)?.size)
+      .filter(([key]) => key !== keep && !this.browserClients.get(key)?.size && !busy.has(key))
       .sort((a, b) => (a[1].lastUsed || 0) - (b[1].lastUsed || 0));
     while (this.browsers.size >= cap && candidates.length) {
       const [key, browser] = candidates.shift();
@@ -1503,16 +1518,23 @@ export class Skadi {
     let browser = this.browsers.get(key);
     if (!browser) {
       await this.evictBrowsers(key);
-      // Headless by default: the page is mirrored inside Skadi's own window, so
-      // a second OS window would only get in the way.
-      browser = new AgentBrowser({
-        headless: this.settings.browserHeadless !== false,
-        port: this.browserPort(),
-        profileDir: profileDirFor(key),
-        key,
-      });
-      this.browsers.set(key, browser);
-      this.wireBrowser(key, browser);
+      const port = await this.browserPort();
+      // Another call may have made this chat's browser while we looked.
+      browser = this.browsers.get(key);
+      if (!browser) {
+        // Headless by default: the page is mirrored inside Skadi's own window,
+        // so a second OS window would only get in the way.
+        browser = new AgentBrowser({
+          headless: this.settings.browserHeadless !== false,
+          port,
+          profileDir: profileDirFor(key),
+          key,
+        });
+        this.browsers.set(key, browser);
+        this.wireBrowser(key, browser);
+      }
+      // Held by the browser from here on (or not needed after all).
+      this.browserPortsClaimed.delete(port);
     }
     browser.lastUsed = Date.now();
     await browser.launch();
@@ -1606,8 +1628,13 @@ export class Skadi {
     if (existing?.console.length) {
       res.write(`event: console_history\ndata: ${JSON.stringify({ entries: existing.console.slice(-200) })}\n\n`);
     }
-    this.getBrowser(key)
-      .then((browser) => browser.startScreencast())
+    // Watching is not browsing. A chat that never opened a page gets an empty
+    // pane, not a Chromium of its own: switching chats with the pane open used
+    // to launch one per chat visited -- seconds of CPU and hundreds of MB
+    // each, and the eviction that made room could close a working agent's
+    // browser. The first navigation launches it (getBrowser starts the
+    // screencast for anyone already watching).
+    existing?.startScreencast()
       .catch((err) => {
         try {
           res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
@@ -2094,67 +2121,48 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
     }, Math.max(0, deadline - Date.now()));
   }
 
-  async missionRun(agent, room, project, brief, approved) {
-    let sessionId = null;
-    const filed = [];
-    const seen = new Set();
-    const file = (rows) => {
-      const fresh = rows.filter((r) => !seen.has(r.title.toLowerCase()));
-      fresh.forEach((r) => seen.add(r.title.toLowerCase()));
-      if (!fresh.length) return [];
-      const made = this.mission.addTickets(fresh, { agent, projectId: project.id, room: room.id, sessionId });
-      filed.push(...made);
-      this.mission.patchAgent(agent.id, { note: `Filed ${filed.length} ticket${filed.length === 1 ? '' : 's'}` });
-      this.missionChanged();
-      return made;
-    };
-    // Tickets are filed as they are found, so a run that is stopped or runs
-    // out of time still leaves its findings behind.
-    let extraTools = room.tickets ? { file_ticket: {
-      schema: {
-        description: 'File one ticket in Mission Control for the user to approve or reject. Call it as soon as a finding is confirmed.',
-        parameters: {
-          type: 'object',
-          properties: {
-            title: { type: 'string', description: 'Short imperative title.' },
-            plain: { type: 'string', description: 'One sentence in everyday words for someone who has not read the code: what goes wrong (or what gets better) and who notices. No code, file names or jargon.' },
-            summary: { type: 'string', description: 'One or two sentences: what and why.' },
-            details: { type: 'string', description: 'Files/lines, reproduction steps, sources, suggested fix.' },
-            priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+  /**
+   * The tools and rules a Mission Control chat carries on every turn, not
+   * just its first: a wrap-up at the deadline, a finished background task
+   * resuming the chat, the no-tickets reminder or the user typing "continue"
+   * all start new turns, and a dwarf told to file its findings with
+   * file_ticket must still have it -- and must still be unable to write files.
+   */
+  missionTools(session) {
+    const meta = session.mission;
+    const room = ROOMS.find((r) => r.id === meta?.room);
+    if (!room) return null;
+    const readOnly = room.id !== 'development' && room.id !== 'docs';
+    if (room.tickets) {
+      return { readOnly, tools: { file_ticket: {
+        schema: {
+          description: 'File one ticket in Mission Control for the user to approve or reject. Call it as soon as a finding is confirmed.',
+          parameters: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Short imperative title.' },
+              plain: { type: 'string', description: 'One sentence in everyday words for someone who has not read the code: what goes wrong (or what gets better) and who notices. No code, file names or jargon.' },
+              summary: { type: 'string', description: 'One or two sentences: what and why.' },
+              details: { type: 'string', description: 'Files/lines, reproduction steps, sources, suggested fix.' },
+              priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+            },
+            required: ['title', 'plain', 'summary'],
           },
-          required: ['title', 'plain', 'summary'],
         },
-      },
-      run: (args) => {
-        const [row] = parseTickets(JSON.stringify([args || {}]));
-        if (!row) return 'Not filed: a ticket needs a title.';
-        const made = file([row]);
-        return made.length ? `Filed ticket ${made[0].id} (${filed.length} so far).` : 'Already filed a ticket with that title.';
-      },
-    } } : null;
+        run: (args) => {
+          const [row] = normalizeTickets([args || {}]);
+          if (!row) return 'Not filed: a ticket needs a title.';
+          const made = this.missionFile(session, [row]);
+          const n = this.missionFiled(session.id).length;
+          return made.length ? `Filed ticket ${made[0].id} (${n} so far).` : 'Already filed a ticket with that title.';
+        },
+      } } };
+    }
     // Development reports each ticket as it goes; a claimed fix waits for the
     // user to check it, a failed one stays approved with the reason on it.
-    const reported = new Set();
-    const attempt = (t, outcome, why) => {
-      this.mission.recordAttempt(t.id, { outcome, note: why, agent, sessionId });
-      reported.add(t.id);
-      this.missionChanged();
-    };
-    // Tickets the run never reported on, once it is over.
-    const settle = (outcome, why, report = '') => {
-      for (const t of approved.filter((x) => !reported.has(x.id))) {
-        if (report.includes(t.id)) attempt(t, 'unclear', 'The final report mentions this ticket but gave no clear result. Read the chat before deciding.');
-        else attempt(t, outcome, why);
-      }
-    };
-    // How the run ended, from the note Stop and the timer leave behind.
-    const endedBy = () => {
-      const n = this.mission.agent(agent.id)?.note || '';
-      if (n.startsWith('Stopped')) return ['stopped', 'You stopped the run before this ticket was reported.'];
-      if (n.startsWith('Time is up')) return ['timeout', 'Time ran out before this ticket was reported.'];
-      return ['not-fixed', 'The run ended without reporting on this ticket.'];
-    };
-    if (room.id === 'development' && approved.length) extraTools = { report_ticket: {
+    const approved = (meta.ticketIds || []).map((id) => this.mission.data.tickets.find((t) => t.id === id)).filter(Boolean);
+    if (room.id !== 'development' || !approved.length) return { readOnly, tools: null };
+    return { readOnly, tools: { report_ticket: {
       schema: {
         description: 'Report your result for one ticket. Call it once per ticket as soon as you know: fixed after you verified it, or not fixed with the reason.',
         parameters: {
@@ -2171,31 +2179,120 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
         const t = approved.find((x) => x.id === String(args?.id || '').trim());
         if (!t) return `Unknown ticket id. Use one of: ${approved.map((x) => x.id).join(', ')}.`;
         const fixed = args.fixed === true || String(args.fixed).toLowerCase() === 'true';
-        attempt(t, fixed ? 'fixed' : 'not-fixed', args.note);
+        const agent = this.mission.agent(meta.agentId) || { id: meta.agentId, name: meta.agentName };
+        this.mission.recordAttempt(t.id, { outcome: fixed ? 'fixed' : 'not-fixed', note: args.note, agent, sessionId: session.id });
+        this.missionChanged();
         return fixed ? `Recorded ${t.id} as fixed; the user will check it.` : `Recorded ${t.id} as not fixed.`;
       },
-    } };
+    } } };
+  }
+
+  /** Tickets a Mission Control chat has filed so far. */
+  missionFiled(sessionId) {
+    return this.mission.data.tickets.filter((t) => t.sessionId === sessionId);
+  }
+
+  /**
+   * File tickets for a Mission Control chat, skipping any title it has filed
+   * before -- including ones the user has since deleted, so a later turn that
+   * repeats its list does not bring them back.
+   */
+  missionFile(session, rows) {
+    const meta = session.mission;
+    const seen = new Set([...(meta.titles || []), ...this.missionFiled(session.id).map((t) => t.title.toLowerCase())]);
+    const fresh = rows.filter((r) => {
+      const key = r.title.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (!fresh.length) return [];
+    meta.titles = [...seen].slice(-200);
+    const agent = this.mission.agent(meta.agentId) || { id: meta.agentId, name: meta.agentName };
+    const made = this.mission.addTickets(fresh, { agent, projectId: meta.projectId, room: meta.room, sessionId: session.id });
+    const n = this.missionFiled(session.id).length;
+    const live = this.mission.agent(meta.agentId);
+    // Stop and the timer leave a note the run reads back; keep those.
+    if (live?.status === 'working' && live.sessionId === session.id && !/^(Stopped|Time is up)/.test(live.note || '')) {
+      this.mission.patchAgent(live.id, { note: `Filed ${n} ticket${n === 1 ? '' : 's'}` });
+    }
+    this.missionChanged();
+    return made;
+  }
+
+  /**
+   * After any turn of a ticket room's chat, file what its replies list. The
+   * brief asks for file_ticket calls, but a model that writes its findings as
+   * a tickets block instead -- in this turn or a later one -- still files.
+   */
+  missionAfterTurn(session, mark) {
+    const room = ROOMS.find((r) => r.id === session.mission?.room);
+    if (!room?.tickets) return;
+    // Compaction can rewrite the transcript mid-turn; then this reads all of
+    // it, and the title check drops what was filed before.
+    const from = session.messages.indexOf(mark) + 1;
+    const rows = session.messages.slice(from)
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => parseTickets(messageText(m.content)));
+    if (rows.length) this.missionFile(session, rows);
+  }
+
+  async missionRun(agent, room, project, brief, approved) {
+    let sessionId = null;
+    const mission = { agentId: agent.id, agentName: agent.name, room: room.id, projectId: project.id,
+      ...(approved.length ? { ticketIds: approved.map((t) => t.id) } : {}) };
+    const filed = () => (sessionId ? this.missionFiled(sessionId).length : 0);
+    const attempt = (t, outcome, why) => {
+      this.mission.recordAttempt(t.id, { outcome, note: why, agent, sessionId });
+      this.missionChanged();
+    };
+    // Tickets the run never reported on, once it is over.
+    const reported = (t) => this.mission.data.tickets.find((x) => x.id === t.id)?.attempts?.some((a) => a.sessionId === sessionId);
+    const settle = (outcome, why, report = '') => {
+      for (const t of approved.filter((x) => !reported(x))) {
+        if (report.includes(t.id)) attempt(t, 'unclear', 'The final report mentions this ticket but gave no clear result. Read the chat before deciding.');
+        else attempt(t, outcome, why);
+      }
+    };
+    // How the run ended, from the note Stop and the timer leave behind.
+    const endedBy = () => {
+      const n = this.mission.agent(agent.id)?.note || '';
+      if (n.startsWith('Stopped')) return ['stopped', 'You stopped the run before this ticket was reported.'];
+      if (n.startsWith('Time is up')) return ['timeout', 'Time ran out before this ticket was reported.'];
+      return ['not-fixed', 'The run ended without reporting on this ticket.'];
+    };
+    const lastReport = (session) => messageText([...session.messages].reverse()
+      .find((m) => m.role === 'assistant' && messageText(m.content) && !m.tool_calls?.length)?.content);
     let note = 'Finished';
     try {
-      const session = await this.chat(null, brief, [], {
+      let session = await this.chat(null, brief, [], {
         provider: agent.provider || undefined,
         model: agent.model || undefined,
         project,
         subagents: false,
         webSearch: true,
         title: `${agent.name} · ${room.name} · ${project.name}`,
-        readOnly: room.id !== 'development' && room.id !== 'docs',
-        extraTools,
+        mission,
         onSession: (sid) => {
           sessionId = sid;
           this.mission.patchAgent(agent.id, { sessionId: sid, note: `Working in ${room.name}` });
           this.missionChanged();
         },
       });
-      const report = [...session.messages].reverse().find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content && !m.tool_calls)?.content || '';
+      let report = lastReport(session);
+      // A run that talks about its findings but never files them gets one
+      // reminder, in the same chat, while it still remembers them.
+      if (room.tickets && !filed() && report && endedBy()[0] === 'not-fixed' && this.mission.agent(agent.id)?.status === 'working') {
+        this.mission.patchAgent(agent.id, { note: 'Filing its findings' });
+        this.missionChanged();
+        session = await this.chat(sessionId, '', [], {
+          systemMessage: 'Mission Control: this run has not filed any tickets yet. If your report lists findings, file each one now with the file_ticket tool, one call per finding. If you found nothing worth filing, reply with one line saying so.',
+        });
+        report = lastReport(session) || report;
+      }
       if (room.tickets) {
-        file(parseTickets(report));
-        note = filed.length ? `Filed ${filed.length} ticket${filed.length === 1 ? '' : 's'}` : 'Finished without filing tickets';
+        const n = filed();
+        note = n ? `Filed ${n} ticket${n === 1 ? '' : 's'}` : 'Finished without filing tickets';
       } else if (room.id === 'development' && approved.length) {
         settle(...endedBy(), report);
         const fixed = approved.filter((t) => this.mission.data.tickets.find((x) => x.id === t.id)?.status === 'check').length;
@@ -2210,7 +2307,8 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
         const [outcome, why] = endedBy();
         settle(outcome === 'not-fixed' ? 'error' : outcome, outcome === 'not-fixed' ? `The run failed: ${err.message.slice(0, 280)}` : why);
       }
-      const kept = filed.length ? ` (${filed.length} ticket${filed.length === 1 ? '' : 's'} filed)` : '';
+      const n = filed();
+      const kept = n ? ` (${n} ticket${n === 1 ? '' : 's'} filed)` : '';
       this.mission.patchAgent(agent.id, { status: 'error', room: 'break', lastRoom: room.id, note: `${err.message.slice(0, 280)}${kept}`, finishedAt: Date.now(), deadline: null });
     }
     this.missionChanged();
@@ -2281,8 +2379,16 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
       );
     }
     const model = this.modelFor(provider);
-    // Mission Control runs name their own project; chats use the active one.
-    const project = opts.project || activeProject();
+    // Mission Control runs name their own project, and every later turn in a
+    // run's chat (a wrap-up, a resumed task, you typing "continue") stays in
+    // it; other chats use the active one.
+    const mission = !opts.project && sessionId
+      ? (stored ?? this.liveSession(sessionId) ?? await this.sessions.get(sessionId).catch(() => null))?.mission
+      : null;
+    const workProject = opts.project
+      || (mission && loadProjects().projects?.find((p) => p.id === mission.projectId))
+      || null;
+    const project = workProject || activeProject();
     // Per-turn reasoning effort from the composer's picker (opencode-style).
     // 'default'/empty means "use the server or provider default" — send nothing.
     const effort = String(opts.effort || '').trim().toLowerCase();
@@ -2324,6 +2430,9 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
     // A title nobody has chosen yet: the model gets to improve on it once the
     // first turn is done (see `refineTitle`). Renaming the chat clears this.
     if (!sessionId && !live) session.titleAuto = !opts.title && Boolean(text.trim());
+    // A Mission Control run: the chat remembers whose run it is, so every
+    // later turn gets the same tools and rules (see missionTools).
+    if (opts.mission && !sessionId) session.mission = opts.mission;
 
     // The chat existed only as a draft until now; hand it that draft's browser
     // so a page the user opened before sending stays open in this chat. The
@@ -2383,6 +2492,8 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
       : opts.subagents !== false;
     if (systemMessage) session.messages.push({ role: 'system', content: systemMessage });
     else this.appendUserMessage(session, text, uploads, provider);
+    // Where this turn starts, for reading back what it said once it ends.
+    const turnMark = session.messages.at(-1);
 
     // Skills whose triggers match the request are handed over directly: a
     // small model often skips load_skill even with the right skill listed.
@@ -2460,7 +2571,15 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
     const pixel = PIXEL_REQUEST.test(text || '')
       || (session.messages || []).some((m) => m.role === 'user' && PIXEL_REQUEST.test(typeof m.content === 'string' ? m.content : ''))
       || Boolean(await this.pixelStudio?.has(session.id));
-    const agent = await this.makeAgent(provider, model, { webSearch: session.webSearch, subagents: session.subagents, pixel, workspace: opts.project?.path, readOnly: opts.readOnly === true, extraTools: opts.extraTools });
+    const missionKit = session.mission ? this.missionTools(session) : null;
+    const agent = await this.makeAgent(provider, model, {
+      webSearch: session.webSearch,
+      subagents: session.subagents,
+      pixel,
+      workspace: workProject?.path,
+      readOnly: opts.readOnly === true || missionKit?.readOnly === true,
+      extraTools: opts.extraTools ?? missionKit?.tools,
+    });
     // Per-turn tool context: background tasks tag this session, and file
     // edits push undo snapshots here (capped; before-images clipped). They
     // ride along in the session file so Undo survives a restart.
@@ -2537,6 +2656,10 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
       workTurn.finishedAt = Date.now();
       if (workTurn.status === 'running') workTurn.status = 'interrupted';
       if (compactions.length) session.compactions = [...(session.compactions || []), ...compactions];
+      // Even a stopped or failed turn may have listed findings worth keeping.
+      if (session.mission) {
+        try { this.missionAfterTurn(session, turnMark); } catch (err) { console.error('[mission]', err.message); }
+      }
       // Once per chat, and about its first message: a later turn must not rename it.
       const askTitle = !systemMessage && session.titleAuto && !session.titleAsked;
       if (askTitle) session.titleAsked = true;
@@ -2743,6 +2866,18 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
         case 'GET instance/pid':
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
           return res.end(String(process.pid));
+        // The desktop shell asks before it force-closes the server, so the
+        // programs started from Skadi are stopped with it (see shutdown).
+        case 'POST shutdown': {
+          if (req.headers.origin && req.headers.origin !== url.origin) return json(403, { error: 'Origin mismatch.' });
+          if (!req.headers['content-type']?.startsWith('application/json')) return json(415, { error: 'JSON required.' });
+          json(202, { stopping: true });
+          setTimeout(async () => {
+            await this.shutdown().catch((err) => console.error('[shutdown]', err.message));
+            process.exit(0);
+          }, 50);
+          return;
+        }
         // ---- updates from GitHub -------------------------------------------
         case 'GET update/status':
           return json(200, await this.updateStatus({ passive: true }));
@@ -3949,6 +4084,13 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
     await this.localSearxng.stop();
     await Promise.all([...this.browsers.values()].map((b) => b.close().catch(() => {})));
     this.browsers.clear();
+    // Dev servers, apps and anything else the agent's commands started --
+    // background tasks and programs they handed off alike (see processes.mjs).
+    const stopped = await stopTrackedProcesses().catch((err) => {
+      console.error('[shutdown] could not stop started programs:', err.message);
+      return 0;
+    });
+    if (stopped) console.log(`stopped ${stopped} program${stopped === 1 ? '' : 's'} started from Skadi`);
     await this.stopServer();
   }
 }

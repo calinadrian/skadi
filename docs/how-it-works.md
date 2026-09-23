@@ -268,8 +268,12 @@ own profile directory, so pages, cookies, logins, console output and
 screenshots stay in the chat that produced them — switching chats swaps the
 pane to that chat's browser rather than showing another conversation's page. A
 chat that browses before its first message keeps the browser when it is saved.
-They are real processes, so `maxBrowsers` (default 4) closes the least recently
-used one nobody is watching; 0 keeps them all.
+They are real processes, so one starts only when a chat first opens a page —
+opening the pane on a chat that never browsed shows it empty rather than
+launching a Chromium for it — and `maxBrowsers` (default 4) closes the least
+recently used one that nobody is watching and no running turn is using; 0 keeps
+them all. Each gets the first free debugging port from 9333 up, skipping ports
+other programs hold.
 
 The viewport is pinned at **1280×800**, which is the point: screenshot pixels
 and click coordinates share one space, so a vision model can identify a target
