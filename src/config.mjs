@@ -45,22 +45,9 @@ export const DEFAULT_SETTINGS = {
   // Offer the update_plan checklist tool and show the Plan pane. Off keeps
   // small models from spending steps on bookkeeping.
   planning: true,
-  // Jarvis-style control. computerControl offers the desktop_* tools (the
-  // user's real mouse, keyboard and screen); off by default because it reaches
-  // outside the project. Voice listens through Windows speech recognition:
-  // phrases starting with the wake word become messages, and replies are read
-  // aloud when voiceSpeak is on. voiceCulture picks a recognizer ("en-US"),
-  // empty means the system language.
+  // Offer the desktop_* tools: the agent drives the user's real screen, mouse
+  // and keyboard. Off by default because it reaches outside the project.
   computerControl: false,
-  voiceWakeWord: 'skadi',
-  voiceSpeak: true,
-  voiceCulture: '',
-  // The natural voice: Kyutai's Pocket TTS on the CPU (see tts.mjs). Off uses
-  // the Windows voice. voiceName is a built-in voice; voiceSample, when set,
-  // is the user's own recording in voices/ to clone.
-  voiceNatural: false,
-  voiceName: 'alba',
-  voiceSample: '',
   // Hand a skill straight to the model when the request matches its
   // triggers (e.g. pixel art), instead of hoping it calls load_skill.
   autoSkills: true,

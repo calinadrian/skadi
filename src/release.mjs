@@ -41,8 +41,8 @@ async function walkSkills(root, dir = 'defaults/skills') {
 export async function releaseFiles(root) {
   const files = [];
   for (const name of TOP_LEVEL) if (await isFile(join(root, name))) files.push(name);
-  // Plus the helpers the Node code launches: Windows input and speech, the voice engine.
-  files.push(...(await listDir(root, 'src', /\.(?:mjs|ps1|py)$/)));
+  // Plus the PowerShell helper desktop control launches.
+  files.push(...(await listDir(root, 'src', /\.(?:mjs|ps1)$/)));
   files.push(...(await listDir(root, 'ui', UI_FILE)));
   for (const name of BUILD_FILES) if (await isFile(join(root, 'build', name))) files.push(`build/${name}`);
   files.push(...(await listDir(root, 'docs', /\.(?:md|png|jpg|webp)$/)));

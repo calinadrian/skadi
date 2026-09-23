@@ -5749,23 +5749,9 @@ function connect() {
     if (!isPendingView(d.sessionId)) toast(`${shortTitle(d.sessionId)} needs approval: ${d.name}`);
   });
 
-  es.addEventListener('voice_speech', (e) => onVoiceSpeech(JSON.parse(e.data)));
-  es.addEventListener('voice_engine', (e) => applyVoiceEngine(JSON.parse(e.data)));
-  es.addEventListener('voice_state', (e) => {
-    const status = JSON.parse(e.data);
-    // The engine stopping by itself (no microphone, no recognizer) turns the
-    // button off and says why.
-    if (!status.listening && voice.on) voice.on = false;
-    renderVoiceToggle(status);
-  });
   es.addEventListener('agent_done', async (e) => {
     if (filesPaneActive()) refreshFilesTab().catch(() => {});
     const outcome = JSON.parse(e.data || '{}');
-    // Answer out loud when the question was asked out loud.
-    if (voice.pendingSession && (voice.pendingSession === '__new__' || voice.pendingSession === outcome.sessionId)) {
-      voice.pendingSession = null;
-      speak(outcome.text);
-    }
     const finishedSessionId = outcome.sessionId ?? null;
     if (finishedSessionId) state.outcomes.set(finishedSessionId, outcome);
     // The transcript is on disk now, so the live buffer has nothing left to
@@ -6735,282 +6721,6 @@ $('effortSelect').onchange = () => {
 
 $('modeSelect').onchange = guard(async () => {
   await setMode($('modeSelect').value);
-});
-
-// ---- Voice control ------------------------------------------------------------
-// The server listens (Windows speech recognition, offline); this side decides
-// what a phrase means. "Skadi, open Chrome" sends "open Chrome", and a bare
-// "Skadi" arms the next phrase for 8 seconds. Replies to spoken requests are
-// read aloud: with the natural voice engine when it is running (streamed, so
-// the first words play within a fraction of a second), else a Windows voice.
-const voice = { on: false, armedUntil: 0, pendingSession: null, sendingSpoken: false, engine: null };
-const player = { ctx: null, abort: null, sources: [] };
-
-function voiceWake() {
-  return String(state.settings?.voiceWakeWord ?? 'skadi').trim();
-}
-
-const voiceNorm = (t) => String(t ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-
-// Mirrors soundsLike in src/voice.mjs: recognition spells names loosely
-// ("Scotty" for "Skadi"), so compare first sound and consonant skeleton.
-function soundsLike(heard, wake) {
-  const a = voiceNorm(heard).replace(/^c/, 'k');
-  const b = voiceNorm(wake).replace(/^c/, 'k');
-  if (!a || !b) return false;
-  if (a === b) return true;
-  if (b.length < 4 || a[0] !== b[0] || Math.abs(a.length - b.length) > 2) return false;
-  const skeleton = (w) => w[0] + w.slice(1)
-    .replace(/ck|c|q/g, 'k').replace(/d/g, 't').replace(/ph/g, 'f').replace(/[aeiouyh]/g, '')
-    .replace(/(.)\1+/g, '$1');
-  return skeleton(a) === skeleton(b);
-}
-
-/** The command after the wake word, '' for the wake word alone, null if absent. */
-function afterWakeWord(text, wake) {
-  const clean = String(text || '').trim();
-  const words = wake.split(/\s+/).filter((w) => voiceNorm(w));
-  if (!words.length) return clean;
-  const tokens = clean.split(/\s+/);
-  let i = 0;
-  while (i < tokens.length && ['hey', 'ok', 'okay', 'hi', 'yo'].includes(voiceNorm(tokens[i]))) i += 1;
-  for (const w of words) {
-    if (i >= tokens.length || !soundsLike(tokens[i], w)) return null;
-    i += 1;
-  }
-  return tokens.slice(i).join(' ').replace(/^[\s,.:;!?-]+/, '').trim();
-}
-
-function renderVoiceToggle(status = {}) {
-  const b = $('btnVoice');
-  b.classList.toggle('active', voice.on);
-  b.classList.toggle('awake', voice.on && Date.now() < voice.armedUntil);
-  b.classList.toggle('error', Boolean(status.error));
-  b.setAttribute('aria-pressed', String(voice.on));
-  b.setAttribute('aria-label', voice.on ? 'Turn off voice control' : 'Turn on voice control');
-  const wake = voiceWake();
-  b.title = status.error
-    ? `Voice control: ${status.error}`
-    : voice.on
-      ? (wake ? `Listening. Say "${wake}, …"` : 'Listening. Everything you say is sent')
-      : 'Voice control: off';
-}
-
-/** Markdown and code are noise read aloud; keep the prose. */
-function speakable(text) {
-  return String(text || '')
-    .replace(/```[\s\S]*?```/g, ' (code omitted) ')
-    .replace(/`([^`]*)`/g, '$1')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/https?:\/\/\S+/g, 'the link')
-    .replace(/[#*_>|~]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 1500);
-}
-
-function stopSpeaking() {
-  player.abort?.abort();
-  player.abort = null;
-  for (const s of player.sources.splice(0)) { try { s.stop(); } catch {} }
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
-}
-
-function isSpeaking() {
-  return Boolean(player.abort) || player.sources.length > 0 || ('speechSynthesis' in window && speechSynthesis.speaking);
-}
-
-/** The Windows voice, preferring the neural "Natural" ones when installed. */
-function speakWindows(text) {
-  if (!('speechSynthesis' in window)) return;
-  const utter = new SpeechSynthesisUtterance(text);
-  const voices = speechSynthesis.getVoices();
-  const lang = (state.settings?.voiceCulture || navigator.language || 'en').slice(0, 2).toLowerCase();
-  utter.voice = voices.find((v) => /natural|neural/i.test(v.name) && v.lang.toLowerCase().startsWith(lang))
-    || voices.find((v) => v.lang.toLowerCase().startsWith(lang)) || null;
-  speechSynthesis.speak(utter);
-}
-
-/**
- * Play the engine's streamed 16-bit PCM as it arrives, each piece scheduled
- * straight after the last so there are no gaps. False when the engine is not
- * running, so the caller can fall back.
- */
-async function speakNatural(text) {
-  const abort = new AbortController();
-  player.abort = abort;
-  const res = await fetch('/api/voice/say', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text }),
-    signal: abort.signal,
-  });
-  if (res.status === 204) return false;
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `voice engine error ${res.status}`);
-  const rate = Number(res.headers.get('x-sample-rate')) || 24000;
-  player.ctx ??= new AudioContext();
-  const ctx = player.ctx;
-  if (ctx.state === 'suspended') await ctx.resume();
-  let at = ctx.currentTime + 0.08;
-  let carry = null;
-  const reader = res.body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done || abort.signal.aborted) break;
-    let bytes = value;
-    if (carry) { bytes = new Uint8Array(carry.length + value.length); bytes.set(carry); bytes.set(value, carry.length); carry = null; }
-    const even = bytes.length - (bytes.length % 2);
-    if (even < bytes.length) carry = bytes.slice(even);
-    if (!even) continue;
-    const pcm = new Int16Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + even));
-    const buffer = ctx.createBuffer(1, pcm.length, rate);
-    const channel = buffer.getChannelData(0);
-    for (let i = 0; i < pcm.length; i += 1) channel[i] = pcm[i] / 32768;
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    source.onended = () => { player.sources = player.sources.filter((s) => s !== source); };
-    at = Math.max(at, ctx.currentTime + 0.02);
-    source.start(at);
-    at += buffer.duration;
-    player.sources.push(source);
-  }
-  if (player.abort === abort) player.abort = null;
-  return true;
-}
-
-async function speak(text, { force = false } = {}) {
-  if (!force && (!voice.on || state.settings?.voiceSpeak === false)) return;
-  const plain = speakable(text);
-  if (!plain) return;
-  stopSpeaking();
-  try {
-    if (await speakNatural(plain)) return;
-  } catch (error) {
-    if (error.name === 'AbortError') return;
-    // A voice-engine problem (say, a cloned voice without the gated model)
-    // should not leave Skadi mute: say it with Windows, and show why.
-    console.warn('[voice]', error.message);
-    if (force) toast(error.message);
-  }
-  speakWindows(plain);
-}
-
-function onVoiceSpeech(msg) {
-  if (!voice.on) return;
-  const text = String(msg.text || '').trim();
-  if (!text) return;
-  const command = afterWakeWord(text, voiceWake());
-  if (msg.type === 'partial') {
-    // Saying the wake word over Skadi stops it talking. Only the wake word:
-    // the microphone also hears Skadi's own voice from the speakers.
-    if (command !== null && isSpeaking()) stopSpeaking();
-    return;
-  }
-  let spoken = command;
-  if (spoken === null && Date.now() < voice.armedUntil) spoken = text;
-  if (spoken === null) return;
-  if (!spoken) {
-    voice.armedUntil = Date.now() + 8000;
-    renderVoiceToggle();
-    setTimeout(() => renderVoiceToggle(), 8100);
-    speak('Yes?');
-    return;
-  }
-  voice.armedUntil = 0;
-  renderVoiceToggle();
-  if (/^(stop|cancel|never ?mind|shut up|quiet)[.!]?$/i.test(spoken)) {
-    stopSpeaking();
-    return;
-  }
-  const input = $('input');
-  input.value = spoken;
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  voice.pendingSession = state.sessionId || '__new__';
-  voice.sendingSpoken = true;
-  try {
-    $('composer').requestSubmit();
-  } finally {
-    voice.sendingSpoken = false;
-  }
-}
-
-function voiceEngineText() {
-  const s = voice.engine || { state: 'off' };
-  if (s.state === 'installing' || s.state === 'starting') return s.step || 'Setting up…';
-  if (s.state === 'error') return s.error || 'The voice engine hit a problem.';
-  if (s.state === 'ready') return s.sample ? 'Running, speaking in your voice.' : 'Running. Pick a built-in voice or add a recording of your own.';
-  return state.settings?.voiceNatural ? 'Starting…' : 'Off: replies use the Windows voice. Turn on Natural voice above.';
-}
-
-function voiceSampleText() {
-  if (voice.engine?.sample) return 'Skadi speaks in the voice from your recording. Only use voices you have permission to use.';
-  return '10 to 30 seconds of one person speaking clearly with no music or noise. WAV, MP3, M4A and most other audio files work. Needs a Hugging Face token (below).';
-}
-
-function refreshVoiceRows() {
-  for (const row of settingsRows) if (row.spec.voiceStatus) row.refs.rerender?.();
-}
-
-/**
- * Any audio file the browser can decode, as a mono 16-bit WAV (base64) of at
- * most 30 seconds: one format for the voice engine, whatever was picked.
- */
-async function recordingToWavBase64(file) {
-  const ctx = new AudioContext();
-  let audio;
-  try {
-    audio = await ctx.decodeAudioData(await file.arrayBuffer());
-  } catch {
-    throw new Error('That file is not audio Skadi can read. Try a WAV or MP3.');
-  } finally {
-    ctx.close().catch(() => {});
-  }
-  const rate = audio.sampleRate;
-  const length = Math.min(audio.length, rate * 30);
-  if (length < rate * 3) throw new Error('The recording is too short: use 10 to 30 seconds of speech.');
-  const mono = new Float32Array(length);
-  for (let c = 0; c < audio.numberOfChannels; c += 1) {
-    const data = audio.getChannelData(c);
-    for (let i = 0; i < length; i += 1) mono[i] += data[i] / audio.numberOfChannels;
-  }
-  const bytes = new DataView(new ArrayBuffer(44 + length * 2));
-  const text = (at, s) => { for (let i = 0; i < s.length; i += 1) bytes.setUint8(at + i, s.charCodeAt(i)); };
-  text(0, 'RIFF'); bytes.setUint32(4, 36 + length * 2, true); text(8, 'WAVE');
-  text(12, 'fmt '); bytes.setUint32(16, 16, true); bytes.setUint16(20, 1, true); bytes.setUint16(22, 1, true);
-  bytes.setUint32(24, rate, true); bytes.setUint32(28, rate * 2, true); bytes.setUint16(32, 2, true); bytes.setUint16(34, 16, true);
-  text(36, 'data'); bytes.setUint32(40, length * 2, true);
-  for (let i = 0; i < length; i += 1) bytes.setInt16(44 + i * 2, Math.max(-1, Math.min(1, mono[i])) * 32767, true);
-  const raw = new Uint8Array(bytes.buffer);
-  let binary = '';
-  for (let i = 0; i < raw.length; i += 0x8000) binary += String.fromCharCode(...raw.subarray(i, i + 0x8000));
-  return btoa(binary);
-}
-
-function applyVoiceEngine(status) {
-  voice.engine = status;
-  refreshVoiceRows();
-}
-
-api('voice/engine').then(applyVoiceEngine).catch(() => {});
-
-$('btnVoice').onclick = guard(async () => {
-  voice.on = !voice.on;
-  renderVoiceToggle();
-  if (voice.on) {
-    // Created on the click: browsers only let a page start audio after a gesture.
-    player.ctx ??= new AudioContext();
-    player.ctx.resume().catch(() => {});
-  } else {
-    stopSpeaking();
-  }
-  try {
-    renderVoiceToggle(await api(voice.on ? 'voice/start' : 'voice/stop', {}));
-  } catch (error) {
-    voice.on = false;
-    renderVoiceToggle();
-    throw error;
-  }
 });
 
 $('btnWebSearch').onclick = guard(async () => {
@@ -8245,7 +7955,6 @@ $('composer').onsubmit = (e) => {
     webSearch: state.webSearch,
     subagents: state.subagents,
     // Said out loud: the agent keeps its answer short enough to hear.
-    voice: voice.sendingSpoken,
   })
     .then(() => {
       // The server answers 202 before the session file lands; if the
@@ -8726,7 +8435,7 @@ function addRow(group, spec) {
     input.type = 'password';
     input.autocomplete = 'new-password';
     input.spellcheck = false;
-    input.placeholder = spec.placeholder ?? (spec.hasValue ? 'Enter a replacement key' : 'Paste API key');
+    input.placeholder = spec.hasValue ? 'Enter a replacement key' : 'Paste API key';
     input.setAttribute('aria-label', `${spec.label} value`);
     const save = el('button', 'btn tiny primary', spec.hasValue ? 'Replace' : 'Save');
     save.type = 'button';
@@ -9557,137 +9266,14 @@ function renderSettingsPane() {
     },
   });
 
-  // ---- Voice & desktop -----------------------------------------------------------
-  const voiceGroup = startGroup(pane, { id: 'voice', title: 'Voice & desktop', glyph: 'bolt', section: 'Agent', desc: 'Talk to Skadi, hear it answer in a natural voice (even your own), and let it use your mouse, keyboard and screen.' });
-  addRow(voiceGroup, {
+  // ---- Desktop control -----------------------------------------------------------
+  const desktop = startGroup(pane, { id: 'desktop', title: 'Desktop control', glyph: 'bolt', section: 'Agent', desc: 'Let the agent use your mouse, keyboard and screen.' });
+  addRow(desktop, {
     key: 'computerControl',
     type: 'toggle',
     icon: 'lock',
     label: 'Let the agent control this computer',
-    desc: 'Gives the agent your real screen, mouse and keyboard: it can open apps and sites, click, type and press shortcuts anywhere, not just in the project ("Skadi, open YouTube in Chrome and play my playlist"). Each action still asks first unless the permission mode is Auto.',
-  });
-  addRow(voiceGroup, {
-    key: 'voiceWakeWord',
-    type: 'text',
-    icon: 'bolt',
-    label: 'Wake word',
-    desc: 'With the microphone on, only what you say after this word is sent: "Skadi, open Spotify". Say it and the request in one breath. Leave it empty to send everything you say. Turn the microphone off and on after changing it.',
-  });
-  addRow(voiceGroup, {
-    key: 'voiceSpeak',
-    type: 'toggle',
-    icon: 'volume',
-    label: 'Read replies aloud',
-    desc: 'While the microphone is on, Skadi answers spoken requests out loud. Say the wake word to interrupt it.',
-  });
-  addRow(voiceGroup, {
-    key: 'voiceNatural',
-    type: 'toggle',
-    icon: 'volume',
-    label: 'Natural voice',
-    desc: 'A lifelike voice that runs on your processor, so the model keeps the whole GPU (Kyutai Pocket TTS). The first time, Skadi installs it by itself: about 1 GB of disk and a few minutes. Off uses the Windows voice.',
-  });
-  addRow(voiceGroup, {
-    type: 'action',
-    icon: 'volume',
-    label: 'Voice engine',
-    voiceStatus: true,
-    desc: () => voiceEngineText(),
-    render: (wrap, entry) => {
-      wrap.replaceChildren();
-      const status = voice.engine || { state: 'off' };
-      wrap.append(el('span', `status-badge ${status.state}`, ({ off: 'Off', installing: 'Installing', starting: 'Starting', ready: 'Running', error: 'Problem' })[status.state] || status.state));
-      const test = el('button', 'btn', 'Test');
-      test.type = 'button';
-      test.title = 'Say a sentence in the chosen voice';
-      test.onclick = guard(() => speak('Hello. This is how I sound. Tell me what to open, play or build.', { force: true }));
-      wrap.append(test);
-      if (status.state === 'error' || status.state === 'ready') {
-        const restart = el('button', 'btn', 'Restart');
-        restart.type = 'button';
-        restart.onclick = guard(() => api('voice/engine/restart', {}));
-        wrap.append(restart);
-      }
-      entry.refs.descEl.textContent = voiceEngineText();
-    },
-  });
-  addRow(voiceGroup, {
-    key: 'voiceName',
-    type: 'select',
-    icon: 'volume',
-    label: 'Built-in voice',
-    desc: 'Used when you have not added a recording of your own. Press Test to hear it.',
-    options: (voice.engine?.voices || ['alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma'])
-      .map((v) => [v, v[0].toUpperCase() + v.slice(1)]),
-  });
-  addRow(voiceGroup, {
-    type: 'action',
-    icon: 'volume',
-    label: 'Your own voice',
-    voiceStatus: true,
-    desc: () => voiceSampleText(),
-    render: (wrap, entry) => {
-      wrap.replaceChildren();
-      const has = Boolean(voice.engine?.sample);
-      const pick = el('button', 'btn', has ? 'Replace recording…' : 'Add recording…');
-      pick.type = 'button';
-      pick.onclick = () => {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = 'audio/*,.wav,.mp3,.m4a,.ogg,.flac';
-        input.onchange = guard(async () => {
-          const file = input.files?.[0];
-          if (!file) return;
-          pick.disabled = true;
-          pick.textContent = 'Preparing…';
-          try {
-            const data = await recordingToWavBase64(file);
-            const r = await api('voice/sample', { name: 'sample.wav', data });
-            state.settings = r.settings;
-            voice.engine = r.engine;
-            refreshVoiceRows();
-            toast('Recording saved. Press Test to hear your voice.');
-          } finally {
-            pick.disabled = false;
-          }
-        });
-        input.click();
-      };
-      wrap.append(pick);
-      if (has) {
-        const remove = el('button', 'btn', 'Remove');
-        remove.type = 'button';
-        remove.onclick = guard(async () => {
-          const r = await api('voice/sample', { clear: true });
-          state.settings = r.settings;
-          voice.engine = r.engine;
-          refreshVoiceRows();
-        });
-        wrap.append(remove);
-      }
-      entry.refs.descEl.textContent = voiceSampleText();
-    },
-  });
-  addRow(voiceGroup, {
-    type: 'secret',
-    icon: 'key',
-    label: 'Hugging Face token',
-    desc: 'Cloning a voice uses Kyutai\'s gated model. Sign in at huggingface.co, accept the terms on the kyutai/pocket-tts page, create a read token and paste it here. Encrypted for your Windows account and never shown again.',
-    hasValue: Boolean(voice.engine?.hasToken),
-    placeholder: voice.engine?.hasToken ? 'Paste a new token to replace it' : 'Paste your token (hf_...)',
-    save: async (token) => {
-      voice.engine = await api('voice/token', { token });
-      activeSettingsGroup = 'voice';
-      renderSettingsPane();
-    },
-  });
-  addRow(voiceGroup, {
-    key: 'voiceCulture',
-    type: 'text',
-    mono: true,
-    icon: 'globe',
-    label: 'Speech language',
-    desc: 'The language Skadi listens for, such as en-US or en-GB. Empty uses your Windows language. More are added under Windows Settings › Time & language › Speech.',
+    desc: 'Gives the agent your real screen, mouse and keyboard: it can open apps and sites, click, type and press shortcuts anywhere, not just in the project ("open YouTube in Chrome and play my playlist"). Each action still asks first unless the permission mode is Auto.',
   });
 
   // ---- Memory --------------------------------------------------------------------

@@ -19,7 +19,6 @@
 /src/*
 !/src/*.mjs
 !/src/*.ps1
-!/src/*.py
 /ui/*
 !/ui/*.js
 !/ui/*.css

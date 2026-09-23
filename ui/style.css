@@ -3703,12 +3703,6 @@ a.mm-link { width: fit-content; }
   color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent-edge);
 }
-/* Voice: listening pulses; right after the wake word it glows solid. */
-.composer-bar .voice-toggle.active { animation: voice-pulse 1.8s ease-in-out infinite; }
-.composer-bar .voice-toggle.awake { background: var(--accent); color: var(--bg); animation: none; }
-.composer-bar .voice-toggle.error { color: var(--danger, #e5484d); }
-@keyframes voice-pulse { 50% { box-shadow: inset 0 0 0 1px var(--accent-edge), 0 0 0 4px var(--accent-row); } }
-@media (prefers-reduced-motion: reduce) { .composer-bar .voice-toggle.active { animation: none; } }
 .composer-bar .capability-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .composer-bar .capability-toggle:disabled { opacity: .45; cursor: not-allowed; }
 .composer-bar .send-btn { width: 34px; height: 34px; border-radius: 10px; margin-left: 4px; }

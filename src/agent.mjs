@@ -431,8 +431,6 @@ export class Agent extends EventEmitter {
           }
           this.emit('done', {
             rounds,
-            // The final answer, so voice mode can read it aloud.
-            text: typeof reply.message?.content === 'string' ? reply.message.content : '',
             usage: reply.usage,
             finishReason: reply.finishReason,
             totalTokens,

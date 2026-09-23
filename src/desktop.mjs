@@ -2,7 +2,7 @@
 // screen, Jarvis-style. Everything goes through one long-lived PowerShell
 // helper (desktop.ps1) so the Win32 glue compiles once, not on every click.
 //
-// The tools are only offered when Settings › Voice & desktop › "Let the agent
+// The tools are only offered when Settings › Desktop control › "Let the agent
 // control this computer" is on, and every one that acts is `mutates`, so the
 // permission mode decides whether each click asks first.
 import { spawn } from 'node:child_process';
