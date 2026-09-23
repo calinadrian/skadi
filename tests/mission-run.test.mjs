@@ -77,6 +77,12 @@ test('development keeps report_ticket on later turns', () => {
   chat.mission.ticketIds = [t.id];
   const kit = s.missionTools(chat);
   assert.equal(kit.readOnly, false);
+  // A fix with nothing run after the edit is sent back, not recorded.
+  const call = (name) => ({ role: 'assistant', tool_calls: [{ id: name, function: { name, arguments: '{}' } }] });
+  chat.messages.push(call('edit_file'));
+  assert.match(kit.tools.report_ticket.run({ id: t.id, fixed: true, note: 'guarded the null' }), /Not recorded/);
+  assert.equal(t.status, 'approved');
+  chat.messages.push(call('run_command'));
   assert.match(kit.tools.report_ticket.run({ id: t.id, fixed: true, note: 'guarded the null' }), /fixed/);
   assert.equal(t.status, 'check');
   assert.equal(t.attempts.at(-1).sessionId, 'chat-1');

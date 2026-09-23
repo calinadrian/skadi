@@ -30,7 +30,7 @@ import { MemoryStore, memoryTools } from './memory.mjs';
 import { SessionStore, redactCredentials } from './sessions.mjs';
 import { searchSession, contextDetails, turnReview, recordCommand } from './workflow.mjs';
 import { topicTitle, modelTitle } from './titles.mjs';
-import { checkForUpdate, applyUpdate, installedVersion } from './update.mjs';
+import { checkForUpdate, applyUpdate, installedVersion, rebuildShellIfStale } from './update.mjs';
 
 // The tooling that moves files between two installations belongs to whoever
 // maintains the app and is not part of a release. Where it is absent, every
@@ -55,7 +55,7 @@ import {
 } from './providers.mjs';
 import { progressReviewInput, progressReviewPrompt, parseProgressReview } from './progress-review.mjs';
 import { delegationPrompt, parseDelegation } from './delegation.mjs';
-import { MissionStore, ROOMS, roomBrief, parseTickets, normalizeTickets, messageText } from './mission.mjs';
+import { MissionStore, ROOMS, roomBrief, parseTickets, normalizeTickets, messageText, unverifiedFix } from './mission.mjs';
 import { loadProjects, activeProject, addProject, removeProject, selectProject, projectSummary, projectsWithStatus } from './projects.mjs';
 import { storeAttachment, attachmentsToBlocks, describeAttachments } from './attachments.mjs';
 import { AgentBrowser, browserTools, SHOTS_DIR, VIEWPORT, profileDirFor } from './browser.mjs';
@@ -2181,6 +2181,9 @@ File each ticket with the file_ticket tool as soon as the finding is confirmed; 
         const t = approved.find((x) => x.id === String(args?.id || '').trim());
         if (!t) return `Unknown ticket id. Use one of: ${approved.map((x) => x.id).join(', ')}.`;
         const fixed = args.fixed === true || String(args.fixed).toLowerCase() === 'true';
+        // A fix claimed without a check after the last edit is sent back, not recorded.
+        const why = fixed && unverifiedFix(session.messages);
+        if (why) return `Not recorded: ${why}. Check the result the user will see first (run the test, or check the page in the browser), then report again, or report fixed=false with what is blocking the check.`;
         const agent = this.mission.agent(meta.agentId) || { id: meta.agentId, name: meta.agentName };
         this.mission.recordAttempt(t.id, { outcome: fixed ? 'fixed' : 'not-fixed', note: args.note, agent, sessionId: session.id });
         this.missionChanged();
@@ -4081,6 +4084,8 @@ Full instructions, examples and troubleshooting: load_skill "${skill.name}".`,
     this.port = port;
     this.vram.start();
     this.startUpdateChecks();
+    // An update may have brought a newer shell than the Skadi.exe on disk.
+    if (this.canInstallUpdates()) rebuildShellIfStale().catch((err) => console.error('[update]', err.message));
     this.localSearxng.reconcile(this.settings).catch((err) => console.error('[searxng]', err.message));
     this.sharing.start();
     const server = createServer((req, res) => {

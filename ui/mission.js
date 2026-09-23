@@ -1455,7 +1455,7 @@ function togglePet(a) {
   // Shown everywhere so it can be found; only the desktop app can do it.
   if (!shellPets()) {
     say(window.chrome?.webview
-      ? 'This Skadi.exe is too old for desktop dwarves. Rebuild it (build/build.ps1) or download the latest release.'
+      ? 'Desktop dwarves need a newer Skadi.exe. Skadi rebuilds it after an update: close Skadi completely and open it again.'
       : 'Desktop dwarves need the Skadi desktop app. Open Skadi.exe instead of the browser.');
     return;
   }

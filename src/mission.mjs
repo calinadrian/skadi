@@ -45,7 +45,7 @@ Budget: ${budget}` : ''}`;
     case 'development': {
       if (!approved.length) return `${who}\n${where}\n\nYou are in DEVELOPMENT but there are no approved tickets for this project. Say so briefly and stop.`;
       const list = approved.map((t, i) => `${i + 1}. [${t.id}] ${t.title} (${t.priority})\n   ${t.summary}\n   ${t.details || ''}`).join('\n');
-      return `${who}\n${where}\n\nYou are in DEVELOPMENT. Work through these approved tickets one at a time, most important first. For each ticket follow exactly these four steps, in order, and never go back to an earlier step:\n1. REVIEW: read only the files you need to find the cause. Stop reading as soon as you know what to change.\n2. IMPLEMENT: make the smallest change that fixes it.\n3. TEST: run one build, test or run command that checks it. If it fails you get ONE fix attempt and one re-run, no more.\n4. DONE: call report_ticket with its id. fixed=true only if the test passed, with a note on what you changed and how you checked it; otherwise fixed=false with what failed. Then move to the next ticket.\n\nDo not re-read files you already read, do not repeat a command that already ran, and do not refactor or explore beyond the ticket. The user reviews every result, so be honest. End with a short report.\n\n${list}`;
+      return `${who}\n${where}\n\nYou are in DEVELOPMENT. Work through these approved tickets one at a time, most important first. For each ticket follow exactly these four steps, in order, and never go back to an earlier step:\n1. REVIEW: read only the files you need to find the cause. Stop reading as soon as you know what to change.\n2. IMPLEMENT: make the smallest change that fixes it.\n3. TEST: check what the user will actually see or get, not that your code is there: run the test, or in the browser check the visible result (for example getComputedStyle, the element's text, whether it is shown). Skip setup the ticket does not need. If it fails you get ONE fix attempt and one re-run, no more.\n4. DONE: call report_ticket with its id. fixed=true only if the test passed, with a note on what you changed and how you checked it; otherwise fixed=false with what failed. Then move to the next ticket.\n\nDo not re-read files you already read, do not repeat a command that already ran, and do not refactor or explore beyond the ticket. The user reviews every result, so be honest. End with a short report.\n\n${list}`;
     }
     default:
       return null;
@@ -53,6 +53,32 @@ Budget: ${budget}` : ''}`;
 }
 
 /** The text of a chat message, whether its content is a string or blocks. */
+// What counts as checking a change: running something, or looking at the
+// page. Opening a page or reading its console alone does not show the fix works.
+const EDITS = new Set(['edit_file', 'write_file', 'apply_patch', 'str_replace']);
+const CHECKS = /^(run_command|browser_(eval|click|type|press|screenshot|snapshot|read|extract|wait))$/;
+
+/**
+ * Why a "fixed" report should not be accepted yet, or '' when it can be: a fix
+ * is only claimed once something was run or looked at after the last edit.
+ */
+export function unverifiedFix(messages) {
+  let lastEdit = -1;
+  let lastCheck = -1;
+  let i = 0;
+  for (const m of messages || []) {
+    for (const call of m.role === 'assistant' ? m.tool_calls || [] : []) {
+      const name = call.function?.name;
+      if (EDITS.has(name)) lastEdit = i;
+      else if (CHECKS.test(name || '')) lastCheck = i;
+      i++;
+    }
+  }
+  if (lastEdit < 0) return 'no file was changed in this chat';
+  if (lastCheck < lastEdit) return 'nothing was run or checked in the browser after the last edit';
+  return '';
+}
+
 export function messageText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';

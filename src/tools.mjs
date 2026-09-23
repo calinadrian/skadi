@@ -11,6 +11,7 @@ import { resolve, relative, join, sep, dirname, basename } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { unifiedDiff, statLine } from './diff.mjs';
+import { styleWarning } from './style-check.mjs';
 import { ROOT } from './config.mjs';
 import { PlanNotice, planText, planToolResult } from './plans.mjs';
 import { trackProcess } from './processes.mjs';
@@ -610,7 +611,8 @@ export function buildTools(ctx) {
         const { diff, added, removed } = unifiedDiff(before, content ?? '');
         ctx.recordEdit?.({ callId: meta?.callId ?? null, path, before, after: content ?? '', added, removed, existed });
         const lines = String(content ?? '').split('\n').length;
-        return `${statLine(existed ? 'Overwrote' : 'Created', path, added, removed)} (${lines} lines)${diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : ''}`;
+        const warn = await styleWarning(ctx.workspace, path, before, content ?? '').catch(() => '');
+        return `${statLine(existed ? 'Overwrote' : 'Created', path, added, removed)} (${lines} lines)${diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : ''}${warn}`;
       },
     },
 
@@ -681,7 +683,8 @@ export function buildTools(ctx) {
         const { diff, added, removed } = unifiedDiff(before, after);
         ctx.recordEdit?.({ callId: meta?.callId ?? null, path, before, after, added, removed, existed: true });
         const n = replace_all ? count : 1;
-        return `${statLine('Edited', path, added, removed)} (${n} replacement${n > 1 ? 's' : ''}${note})${diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : ''}`;
+        const warn = await styleWarning(ctx.workspace, path, before, after).catch(() => '');
+        return `${statLine('Edited', path, added, removed)} (${n} replacement${n > 1 ? 's' : ''}${note})${diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : ''}${warn}`;
       },
     },
 

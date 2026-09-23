@@ -214,6 +214,42 @@ async function pruneBackups(dir) {
   }
 }
 
+/**
+ * Rebuild Skadi.exe from the updated build/Skadi.cs. Files alone do not change
+ * the shell, so without this an update brings UI that needs a newer shell than
+ * the one running it. Skadi.exe is usually running now: Windows will not let it
+ * be overwritten but does let it be renamed, so the old one steps aside to
+ * Skadi.exe.old and the new one takes over on the next start.
+ */
+export async function rebuildShell(root = ROOT) {
+  const exe = join(root, 'Skadi.exe');
+  if (process.platform !== 'win32' || !existsSync(exe)) return false;
+  const out = await mkdtemp(join(root, 'build', '.shell-'));
+  try {
+    const built = join(out, 'Skadi.exe');
+    await exec('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'build', 'build.ps1'), '-OutFile', built],
+      { cwd: root, timeout: 120000, windowsHide: true });
+    if (!existsSync(built)) return false;
+    const old = `${exe}.old`;
+    await rm(old, { force: true }).catch(() => {});
+    await rename(exe, existsSync(old) ? `${exe}.${Date.now()}.old` : old);
+    await rename(built, exe);
+    return true;
+  } catch (err) {
+    console.error('[update] could not rebuild Skadi.exe:', err.message);
+    return false;
+  } finally {
+    await rm(out, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Rebuild Skadi.exe when build/Skadi.cs is newer than it (after an update, or one installed before this existed). */
+export async function rebuildShellIfStale(root = ROOT) {
+  const [src, exe] = await Promise.all([join(root, 'build', 'Skadi.cs'), join(root, 'Skadi.exe')]
+    .map((f) => stat(f).then((s) => s.mtimeMs, () => 0)));
+  return Boolean(src && exe && src > exe) && rebuildShell(root);
+}
+
 let installing = false;
 
 /** Download the newest commit and install it over this one. The caller restarts the server. */
@@ -237,11 +273,12 @@ export async function applyUpdate({ root = ROOT } = {}) {
     const backup = join(backupsDir(root), `update-${new Date().toISOString().replace(/[:.]/g, '-')}`);
     await mkdir(backup, { recursive: true });
     const result = await installRelease(tree, root, files, backup);
+    const shellRebuilt = await rebuildShellIfStale(root);
     const version = await readFile(join(tree, 'package.json'), 'utf8').then((t) => JSON.parse(t).version).catch(() => null);
     await writeFile(join(root, STAMP), JSON.stringify({ sha: check.latest.sha, version, updatedAt: Date.now() }, null, 2) + '\n');
     await pruneBackups(backupsDir(root));
     forgetCheck();
-    return { updated: true, sha: check.latest.sha, version, ...result };
+    return { updated: true, sha: check.latest.sha, version, shellRebuilt, ...result };
   } finally {
     installing = false;
     if (work) await rm(work, { recursive: true, force: true }).catch(() => {});
