@@ -120,6 +120,7 @@ export class MissionStore {
       model: input.model || null,
       ...(input.color ? { color: String(input.color).slice(0, 20) } : {}),
       ...(input.beard !== undefined ? { beard: input.beard ? String(input.beard).slice(0, 20) : null } : {}),
+      ...(input.look ? { look: input.look === 'girl' ? 'girl' : 'boy' } : {}),
     });
     this.save();
     return a;

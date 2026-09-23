@@ -198,12 +198,32 @@ const DWARF = [
   '.tTTTTBBBBTTTTt.',
   '.ttTTTTbbTTTTtt.',
 ];
+// A dwarf girl: a flower on the helmet, braids (B) with ties in her colour
+// (m), a smile, and a tunic that flares into a skirt.
+const DWARF_GIRL = [
+  '.....HHHHHH.....',
+  '...HHhhHHHHFfF..',
+  '..HhhHHHHHHHFH..',
+  '..MmMMMMMMMMmM..',
+  '.BBSSSSSSSSSSBB.',
+  '.BSSESSSSSSESSB.',
+  '.BSRESSNNSSERSB.',
+  '.BSSSSSPPSSSSSB.',
+  '.BBSSSSSSSSSSBB.',
+  '.BBTTTTTTTTTTBB.',
+  'TBbTTTTTTTTTTbBT',
+  'TmTTTTTTTTTTTTmT',
+  'KBTTTTTTTTTTTTBK',
+  '.LLLLLLGGLLLLLL.',
+  '.tTTTTTTTTTTTTt.',
+  'ttTTTTTTTTTTTTtt',
+];
 const LEGS = {
   stand: ['..DDDD....DDDD..', '.DDDDD....DDDDD.'],
   a: ['..DDDD....DDDD..', '.DDDDD..........'],
   b: ['..DDDD....DDDD..', '..........DDDDD.'],
 };
-const SKIN = { S: '#f6caa4', R: '#f29a8c', N: '#e59b78', E: '#2b1d15', H: '#b9c3cc', h: '#eef3f6', K: '#f6caa4', D: '#4b3426', L: '#5e3d26', O: '#a8574a' };
+const SKIN = { S: '#f6caa4', R: '#f29a8c', N: '#e59b78', E: '#2b1d15', H: '#b9c3cc', h: '#eef3f6', K: '#f6caa4', D: '#4b3426', L: '#5e3d26', O: '#a8574a', G: '#f2c94c', P: '#e07b6e', F: '#ff8fb1', f: '#ffe27a' };
 
 // What a dwarf holds, in the sprite's own units; the right hand is at 15,12.
 const TOOLS = {
@@ -223,7 +243,8 @@ function dwarfPal(a) {
 
 function sprite(a, { tool = null, portrait = false } = {}) {
   const pal = dwarfPal(a);
-  const body = `<g class="mc-body">${paint(DWARF, { ...pal, E: pal.S })}<g class="mc-eyes">${paint(DWARF, { E: pal.E })}</g></g>`;
+  const rows = a.look === 'girl' ? DWARF_GIRL : DWARF;
+  const body = `<g class="mc-body">${paint(rows, { ...pal, E: pal.S })}<g class="mc-eyes">${paint(rows, { E: pal.E })}</g></g>`;
   const legs = portrait
     ? paint(LEGS.stand, pal, 16)
     : `<g class="mc-legs-stand">${paint(LEGS.stand, pal, 16)}</g><g class="mc-legs-a">${paint(LEGS.a, pal, 16)}</g><g class="mc-legs-b">${paint(LEGS.b, pal, 16)}</g>`;
@@ -934,14 +955,14 @@ function swatches(list, value, onPick, label) {
 }
 
 function editAgent(a) {
-  const draft = { name: a?.name || '', color: safeColor(a?.color, TUNICS[(m.data?.agents.length || 0) % TUNICS.length]), beard: a?.beard || '' };
+  const draft = { name: a?.name || '', color: safeColor(a?.color, TUNICS[(m.data?.agents.length || 0) % TUNICS.length]), beard: a?.beard || '', look: a?.look === 'girl' ? 'girl' : 'boy' };
   const art = h('div', 'mc-preview');
   const redraw = () => art.replaceChildren(sprite({ ...draft, name: draft.name || 'new', beard: draft.beard || undefined }, { portrait: true }));
 
   const body = h('div', 'mc-form');
   const name = h('input', 'mc-input');
   name.value = draft.name;
-  name.placeholder = 'e.g. Brokk';
+  name.placeholder = draft.look === 'girl' ? 'e.g. Runa' : 'e.g. Brokk';
   name.maxLength = 40;
   name.oninput = () => { draft.name = name.value; if (!draft.beard) beard.mark(beardOf({ name: draft.name || 'new' })); redraw(); };
   const desc = h('textarea', 'mc-input');
@@ -979,7 +1000,26 @@ function editAgent(a) {
 
   const looks = h('div', 'mc-looks');
   const picks = h('div', 'mc-form');
-  picks.append(field('Tunic', tunic.row), field('Beard', beard.row));
+  const hairField = field(draft.look === 'girl' ? 'Hair' : 'Beard', beard.row);
+  const kind = h('div', 'mc-seg');
+  kind.setAttribute('role', 'radiogroup');
+  kind.setAttribute('aria-label', 'Dwarf');
+  for (const [v, label] of [['boy', 'Boy'], ['girl', 'Girl']]) {
+    const b = h('button', 'mc-seg-btn', label);
+    b.type = 'button';
+    b.dataset.v = v;
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(draft.look === v));
+    b.onclick = () => {
+      draft.look = v;
+      kind.querySelectorAll('.mc-seg-btn').forEach((x) => x.setAttribute('aria-checked', String(x.dataset.v === v)));
+      hairField.querySelector('.mc-field-label').textContent = v === 'girl' ? 'Hair' : 'Beard';
+      name.placeholder = v === 'girl' ? 'e.g. Runa' : 'e.g. Brokk';
+      redraw();
+    };
+    kind.append(b);
+  }
+  picks.append(field('Dwarf', kind), field('Tunic', tunic.row), hairField);
   looks.append(art, picks);
   const brains = h('div', 'mc-row');
   brains.append(field('Provider', prov), field('Model', model));
@@ -990,7 +1030,7 @@ function editAgent(a) {
     ['Cancel'],
     [a ? 'Save' : 'Hire', 'primary', async () => {
       try {
-        m.data = await api('mission/agent', { id: a?.id, name: name.value, description: desc.value, color: draft.color, beard: draft.beard || null, provider: prov.value || null, model: model.value || null });
+        m.data = await api('mission/agent', { id: a?.id, name: name.value, description: desc.value, color: draft.color, beard: draft.beard || null, look: draft.look, provider: prov.value || null, model: model.value || null });
         render();
       } catch (err) { say(err.message); name.focus(); return false; }
     }],

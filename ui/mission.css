@@ -293,6 +293,11 @@ button.mc-stat:hover { border-color: var(--accent-edge); color: var(--mc-ink); }
 .mc-preview { width: 78px; height: 86px; flex: none; display: grid; place-items: center; border-radius: 10px; background: radial-gradient(circle at 50% 80%, rgba(240, 179, 90, .22), transparent 70%), var(--mc-bg); }
 .mc-preview .mc-sprite { width: 56px; }
 .mc-looks .mc-form { flex: 1; gap: 8px; }
+.mc-seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--mc-bg); border: 1px solid var(--mc-edge); align-self: flex-start; }
+.mc-seg-btn { border: 0; background: transparent; color: var(--mc-dim); font: 600 12.5px var(--sans); padding: 4px 14px; border-radius: 999px; cursor: pointer; }
+.mc-seg-btn:hover { color: var(--mc-ink); }
+.mc-seg-btn[aria-checked="true"] { background: var(--mc-gold); color: #2a1906; }
+.mc-seg-btn:focus-visible { outline: 2px solid var(--accent-edge); outline-offset: 1px; }
 .mc-swatches { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .mc-swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(0, 0, 0, .35); cursor: pointer; padding: 0; }
 .mc-swatch[aria-checked="true"] { box-shadow: 0 0 0 2px var(--mc-panel-2), 0 0 0 4px var(--mc-ink); }
