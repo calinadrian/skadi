@@ -604,8 +604,8 @@ function crewCard(a) {
   const body = h('div', 'mc-card-body');
   const top = h('div', 'mc-card-top');
   top.append(h('span', 'mc-card-name', a.name), pill(a));
-  if (shellPets()) {
-    const out = onDesktop(a.id);
+  {
+    const out = shellPets() && onDesktop(a.id);
     top.append(iconBtn('desk', out ? `Take ${a.name} off the desktop` : `Put ${a.name} on the desktop`, () => togglePet(a), `mc-card-desk${out ? ' on' : ''}`));
   }
   top.append(iconBtn('edit', `Edit ${a.name}`, () => editAgent(a), 'mc-card-edit'));
@@ -938,7 +938,7 @@ function agentMenu(a) {
     }],
     ['Edit', '', () => { setTimeout(() => editAgent(a)); }],
   ];
-  if (shellPets()) actions.push([onDesktop(a.id) ? 'Take off desktop' : 'Put on desktop', '', () => togglePet(a)]);
+  actions.push([shellPets() && onDesktop(a.id) ? 'Take off desktop' : 'Put on desktop', '', () => togglePet(a)]);
   if (a.sessionId) actions.push([working ? 'Open chat' : 'Last chat', '', () => openChat(a.sessionId)]);
   if (working) actions.push(['Stop', 'primary', () => stop(a)]);
   else {
@@ -1452,6 +1452,13 @@ async function syncPets() {
 }
 
 function togglePet(a) {
+  // Shown everywhere so it can be found; only the desktop app can do it.
+  if (!shellPets()) {
+    say(window.chrome?.webview
+      ? 'This Skadi.exe is too old for desktop dwarves. Rebuild it (build/build.ps1) or download the latest release.'
+      : 'Desktop dwarves need the Skadi desktop app. Open Skadi.exe instead of the browser.');
+    return;
+  }
   const all = pets.load();
   if (all[a.id]) {
     delete all[a.id];
